@@ -33,4 +33,3 @@ LABEL org.opencontainers.image.title="SoundCloud Archiver Bot" \
 
 # Run the application
 ENTRYPOINT ["/app/scarchivebot"]
-CMD ["--help"] 

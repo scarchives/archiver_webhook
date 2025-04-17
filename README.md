@@ -36,6 +36,7 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
    ```json
    {
      "discord_webhook_url": "YOUR_DISCORD_WEBHOOK_URL",
+     "log_level": "info",
      "poll_interval_sec": 60,
      "users_file": "users.json",
      "tracks_file": "tracks.json",
@@ -68,6 +69,7 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
 ## Configuration Options
 
 - `discord_webhook_url` (required): The Discord webhook URL to send track notifications to
+- `log_level` (default: "info"): Logging level for the application
 - `poll_interval_sec` (default: 60): How often to check for new tracks, in seconds
 - `users_file` (default: "users.json"): Path to the file containing user IDs to watch
 - `tracks_file` (default: "tracks.json"): Path to the tracks database file for persistent storage
@@ -104,13 +106,18 @@ To post a specific track to Discord without adding it to the database:
 ./scarchivebot --post-track https://soundcloud.com/artist/track-name
 ```
 
-Set the `RUST_LOG` environment variable to control logging level:
+# Logging
 
-```bash
-RUST_LOG=info ./scarchivebot
+Logging is now controlled by the `log_level` field in your `config.json`.
+Valid values: `trace`, `debug`, `info`, `warn`, `error` (default: `info`).
+
+Example:
+```json
+{
+  "log_level": "debug",
+  ...
+}
 ```
-
-Valid log levels: `trace`, `debug`, `info`, `warn`, `error`
 
 ### Docker Installation
 
@@ -128,7 +135,6 @@ docker run -d --name scarchivebot \
   -v "$(pwd)/users.json:/app/users.json:rw" \
   -v "$(pwd)/tracks.json:/app/tracks.json:rw" \
   -v "$(pwd)/temp:/app/temp:rw" \
-  -e RUST_LOG=info \
   ghcr.io/scarchive/scarchivebot:latest
 ```
 
@@ -153,9 +159,6 @@ services:
       - ./users.json:/app/users.json:rw
       - ./tracks.json:/app/tracks.json:rw
       - ./temp:/app/temp:rw
-    environment:
-      - RUST_LOG=${RUST_LOG:-info}
-    # By default, run in watcher mode
     command: ""
 ```
 
@@ -200,7 +203,6 @@ docker run -d --name scarchivebot \
   -v "$(pwd)/users.json:/app/users.json:rw" \
   -v "$(pwd)/tracks.json:/app/tracks.json:rw" \
   -v "$(pwd)/temp:/app/temp:rw" \
-  -e RUST_LOG=info \
   scarchivebot
 ```
 
