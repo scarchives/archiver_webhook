@@ -187,7 +187,9 @@ fn build_track_embed(track: &Track) -> Value {
     debug!("Created {} embed fields for Discord message", fields.len());
     
     // Get original high-resolution artwork URL if available
-    let artwork_url = track.artwork_url.clone().unwrap_or_default();
+    let artwork_url = track.artwork_url.clone()
+        .map(|url| crate::soundcloud::get_original_artwork_url(&url))
+        .unwrap_or_default();
     
     // Create the embed object
     json!({
