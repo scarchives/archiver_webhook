@@ -5,7 +5,7 @@ use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use log::{info, warn, error, debug};
-use crate::soundcloud::{Track, get_original_artwork_url};
+use crate::soundcloud::Track;
 
 /// Send a track to Discord via webhook
 pub async fn send_track_webhook(
@@ -186,15 +186,6 @@ fn build_track_embed(track: &Track) -> Value {
     
     // Get original high-resolution artwork URL if available
     let artwork_url = track.artwork_url.clone().unwrap_or_default();
-    let original_artwork_url = if !artwork_url.is_empty() {
-        get_original_artwork_url(&artwork_url)
-    } else {
-        artwork_url
-    };
-    
-    if !original_artwork_url.is_empty() {
-        debug!("Using original artwork URL: {}", original_artwork_url);
-    }
     
     // Create the embed object
     json!({
@@ -214,7 +205,7 @@ fn build_track_embed(track: &Track) -> Value {
             "icon_url": track.user.avatar_url.clone().unwrap_or_default()
         },
         "thumbnail": {
-            "url": original_artwork_url
+            "url": artwork_url
         },
         "fields": fields
     })
@@ -322,18 +313,10 @@ async fn send_with_audio_files(
         
         // Add to form
         debug!("Adding part to form: file{} as {} (MIME: {})", i, file_name, mime_type);
-        match multipart::Part::bytes(buffer)
+        let part = multipart::Part::bytes(buffer)
             .file_name(file_name.clone())
-            .mime_str(mime_type)
-        {
-            Ok(part) => {
-                form = form.part(format!("file{}", i), part);
-            },
-            Err(e) => {
-                error!("Failed to create multipart part: {}", e);
-                return Err(e.into());
-            }
-        }
+            .mime_str(mime_type)?;
+        form = form.part(format!("file{}", i), part);
     }
     
     // Send the form

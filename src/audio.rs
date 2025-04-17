@@ -7,7 +7,7 @@ use tokio::process::Command as TokioCommand;
 use tokio::fs::File as TokioFile;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
-use crate::soundcloud::{Track, get_stream_url, get_original_artwork_url};
+use crate::soundcloud::{Track, get_stream_url};
 
 /// Download and transcode audio from a SoundCloud track
 /// Returns paths to the MP3, OGG, Artwork, and JSON metadata files
@@ -107,14 +107,13 @@ pub async fn process_track_audio(
     if let Some(artwork_url) = &track.artwork_url {
         if !artwork_url.is_empty() {
             // Get the original high-res image URL
-            let original_url = get_original_artwork_url(artwork_url);
-            info!("Downloading original artwork from: {}", original_url);
+            info!("Downloading original artwork from: {}", artwork_url);
             
             // Create file path for artwork
             let artwork_path = work_dir.join(format!("{}_cover.jpg", sanitized_title));
             
             // Download the artwork
-            match download_artwork(&original_url, &artwork_path).await {
+            match download_artwork(&artwork_url, &artwork_path).await {
                 Ok(()) => {
                     let file_size = match fs::metadata(&artwork_path) {
                         Ok(metadata) => metadata.len(),

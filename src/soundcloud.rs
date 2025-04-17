@@ -11,6 +11,13 @@ use tokio::time::sleep;
 // Global client ID cache
 lazy_static::lazy_static! {
     static ref CLIENT_ID: Mutex<Option<String>> = Mutex::new(None);
+    static ref HTTP_CLIENT: Client = Client::builder()
+        .timeout(Duration::from_secs(30))
+        .pool_max_idle_per_host(10)
+        .build()
+        .unwrap();
+    static ref SCRIPT_REGEX: Regex = Regex::new(r#"<script crossorigin src="(https://a-v2\.sndcdn\.com/assets/[^"]+)"></script>"#).unwrap();
+    static ref CLIENT_ID_REGEX: Regex = Regex::new(r#"client_id:"([^"]+)"#).unwrap();
 }
 
 /// Track metadata returned from the SoundCloud API
@@ -105,8 +112,7 @@ async fn generate_client_id() -> Result<String, Box<dyn std::error::Error>> {
         .await?;
     
     // Extract script URLs
-    let script_regex = Regex::new(r#"<script crossorigin src="(https://a-v2\.sndcdn\.com/assets/[^"]+)"></script>"#)?;
-    let matches: Vec<_> = script_regex.captures_iter(&html).collect();
+    let matches: Vec<_> = SCRIPT_REGEX.captures_iter(&html).collect();
     
     if matches.is_empty() {
         error!("No script URLs found on SoundCloud homepage - site structure may have changed");
@@ -116,7 +122,6 @@ async fn generate_client_id() -> Result<String, Box<dyn std::error::Error>> {
     debug!("Found {} potential script URLs to check for client ID", matches.len());
     
     // Check each script for the client ID
-    let client_id_regex = Regex::new(r#"client_id:"([^"]+)"#)?;
     
     for (idx, cap) in matches.iter().enumerate() {
         if let Some(script_url) = cap.get(1) {
@@ -139,7 +144,7 @@ async fn generate_client_id() -> Result<String, Box<dyn std::error::Error>> {
                 }
             };
             
-            if let Some(client_id_match) = client_id_regex.captures(&script_content) {
+            if let Some(client_id_match) = CLIENT_ID_REGEX.captures(&script_content) {
                 if let Some(client_id) = client_id_match.get(1) {
                     let id = client_id.as_str().to_string();
                     debug!("Successfully extracted client ID from script {}: {}", idx + 1, id);
