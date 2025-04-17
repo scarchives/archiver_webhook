@@ -120,7 +120,7 @@ You can use the Docker image from GitHub Container Registry, which is automatica
 
 ```bash
 # Pull the latest image
-docker pull ghcr.io/SCArchive/scarchivebot:latest
+docker pull ghcr.io/scarchive/scarchivebot:latest
 
 # Run with your configuration files
 docker run -d --name scarchivebot \
@@ -129,7 +129,7 @@ docker run -d --name scarchivebot \
   -v "$(pwd)/tracks.json:/app/tracks.json:rw" \
   -v "$(pwd)/temp:/app/temp:rw" \
   -e RUST_LOG=info \
-  ghcr.io/SCArchive/scarchivebot:latest
+  ghcr.io/scarchive/scarchivebot:latest
 ```
 
 Available tags:
@@ -145,7 +145,7 @@ version: '3'
 
 services:
   scarchivebot:
-    image: ghcr.io/SCArchive/scarchivebot:latest
+    image: ghcr.io/scarchive/scarchivebot:latest
     container_name: scarchivebot
     restart: unless-stopped
     volumes:

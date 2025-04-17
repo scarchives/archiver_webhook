@@ -8,6 +8,9 @@ use log::{info, warn};
 pub struct Config {
     // Discord webhook URL for sending notifications
     pub discord_webhook_url: String,
+    /// Logging level (trace, debug, info, warn, error)
+    #[serde(default = "default_log_level")]
+    pub log_level: String,
     // Poll interval in seconds
     #[serde(default = "default_poll_interval")]
     pub poll_interval_sec: u64,
@@ -40,10 +43,16 @@ fn default_max_tracks_per_user() -> usize {
     200
 }
 
+/// Default log level if not specified in config.json
+fn default_log_level() -> String {
+    "info".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
             discord_webhook_url: "".to_string(),
+            log_level: default_log_level(),
             poll_interval_sec: default_poll_interval(),
             users_file: default_users_file(),
             tracks_file: default_tracks_file(),

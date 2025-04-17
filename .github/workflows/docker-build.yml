@@ -28,7 +28,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       # Create an empty Cargo.lock file if it doesn't exist
-      - name: Check/Create Cargo.lock
+      - name: Check for Cargo.lock
         run: |
           if [ ! -f "Cargo.lock" ]; then
             echo "Creating empty Cargo.lock file"
@@ -50,8 +50,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/SCArchive/scarchivebot:latest
-            ghcr.io/SCArchive/scarchivebot:${{ steps.commit_info.outputs.sha }}
+            ghcr.io/scarchive/scarchivebot:latest
+            ghcr.io/scarchive/scarchivebot:${{ steps.commit_info.outputs.sha }}
           build-args: |
             VERSION=latest
 

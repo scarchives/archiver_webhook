@@ -4,6 +4,8 @@ use std::time::Duration;
 use std::env;
 use log::{info, warn, error, debug, trace};
 use tokio::sync::Mutex;
+use simple_logger;
+use log::LevelFilter;
 
 mod audio;
 mod config;
@@ -76,17 +78,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 /// Setup logger with appropriate configuration
 fn setup_logger() {
-    // Get log level from environment or use default
-    match env_logger::try_init() {
-        Ok(_) => {
-            // Successfully initialized logger
-            let log_level = env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
-            debug!("Logger initialized with level: {}", log_level);
-        },
-        Err(e) => {
-            // Print to stderr since logging isn't working
-            eprintln!("Failed to initialize logger: {}", e);
-        }
+    // Initialize simple logger with default info level
+    if let Err(e) = simple_logger::init() {
+        eprintln!("Failed to initialize logger: {}", e);
     }
 }
 
@@ -329,6 +323,14 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error>> {
     info!("Loading configuration from {}", config_path);
     let config = match Config::load(config_path) {
         Ok(c) => {
+            // Configure log filter based on config
+            match c.log_level.parse::<LevelFilter>() {
+                Ok(level) => log::set_max_level(level),
+                Err(_) => {
+                    warn!("Invalid log_level '{}' in config.json; defaulting to 'info'", c.log_level);
+                    log::set_max_level(LevelFilter::Info);
+                }
+            }
             debug!("Configuration loaded successfully");
             debug!("Poll interval: {} seconds", c.poll_interval_sec);
             debug!("Users file: {}", c.users_file);
@@ -342,6 +344,9 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error>> {
         }
     };
     
+    // Log system info now that logger is configured
+    log_system_info();
+
     // Load users
     info!("Loading users from {}", config.users_file);
     let users = match Users::load(&config.users_file) {
