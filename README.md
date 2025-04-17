@@ -6,8 +6,10 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
 
 - Monitors SoundCloud users for new track uploads
 - Downloads and transcodes tracks to MP3 and OGG formats
-- Sends rich embeds to Discord with track details and audio files
-- Ephemeral or persistent state tracking
+- Downloads original high-resolution artwork
+- Creates complete JSON snapshots of track metadata
+- Sends rich embeds to Discord with track details and media files
+- Simple tracks database for persistent state tracking
 - Configurable polling interval
 - Automatic client ID regeneration
 
@@ -29,7 +31,7 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
      "discord_webhook_url": "YOUR_DISCORD_WEBHOOK_URL",
      "poll_interval_sec": 60,
      "users_file": "users.json",
-     "db_file": "db.json",
+     "tracks_file": "tracks.json",
      "max_tracks_per_user": 200,
      "temp_dir": null
    }
@@ -49,7 +51,7 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
 - `discord_webhook_url` (required): The Discord webhook URL to send track notifications to
 - `poll_interval_sec` (default: 60): How often to check for new tracks, in seconds
 - `users_file` (default: "users.json"): Path to the file containing user IDs to watch
-- `db_file` (optional): Path to the database file for persistent storage (if not specified, in-memory DB is used)
+- `tracks_file` (default: "tracks.json"): Path to the tracks database file for persistent storage
 - `max_tracks_per_user` (default: 200): Maximum number of tracks to fetch per user
 - `temp_dir` (optional): Directory for temporary files (if not specified, system temp dir is used)
 
@@ -67,7 +69,19 @@ To resolve a SoundCloud URL and get information (artist, track, user info):
 ./scarchivebot --resolve https://soundcloud.com/artist/track-name
 ```
 
-This is useful for finding user IDs to add to your watchlist.
+To initialize the tracks database with all existing tracks from watched users:
+
+```bash
+./scarchivebot --init-tracks
+```
+
+To post a specific track to Discord without adding it to the database:
+
+```bash
+./scarchivebot --post-track 1234567890
+# Or with a URL
+./scarchivebot --post-track https://soundcloud.com/artist/track-name
+```
 
 Set the `RUST_LOG` environment variable to control logging level:
 
@@ -82,8 +96,16 @@ Valid log levels: `trace`, `debug`, `info`, `warn`, `error`
 SoundCloud doesn't expose user IDs directly in the UI, but you can find them by:
 
 1. Going to the user's profile page
-2. Right-clicking and viewing the page source
-3. Searching for `"id":` followed by a number (e.g., `"id":123456`)
+2. Using the `--resolve` command with the user's profile URL
+3. The command will display the user ID which you can then add to your users.json file
+
+## What Gets Archived
+
+For each track, the bot will:
+1. Download and transcode audio to MP3 and OGG formats
+2. Download the original high-resolution artwork
+3. Create a complete JSON snapshot of all track metadata
+4. Send everything to Discord with a rich embed containing track details
 
 ## Limitations
 
