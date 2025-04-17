@@ -5,7 +5,7 @@ use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
 use log::{info, warn, error, debug};
-use crate::soundcloud::Track;
+use crate::soundcloud::{Track, get_original_artwork_url};
 
 /// Send a track to Discord via webhook
 pub async fn send_track_webhook(
@@ -184,6 +184,18 @@ fn build_track_embed(track: &Track) -> Value {
     
     debug!("Created {} embed fields for Discord message", fields.len());
     
+    // Get original high-resolution artwork URL if available
+    let artwork_url = track.artwork_url.clone().unwrap_or_default();
+    let original_artwork_url = if !artwork_url.is_empty() {
+        get_original_artwork_url(&artwork_url)
+    } else {
+        artwork_url
+    };
+    
+    if !original_artwork_url.is_empty() {
+        debug!("Using original artwork URL: {}", original_artwork_url);
+    }
+    
     // Create the embed object
     json!({
         "title": track.title,
@@ -202,7 +214,7 @@ fn build_track_embed(track: &Track) -> Value {
             "icon_url": track.user.avatar_url.clone().unwrap_or_default()
         },
         "thumbnail": {
-            "url": track.artwork_url.clone().unwrap_or_default()
+            "url": original_artwork_url
         },
         "fields": fields
     })

@@ -2,7 +2,7 @@ use serde::{Deserialize, Serialize};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::Path;
-use log::{info, warn, error};
+use log::{info, warn};
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Config {

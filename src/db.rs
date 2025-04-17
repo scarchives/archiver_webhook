@@ -2,7 +2,7 @@ use std::collections::HashSet;
 use std::fs::File;
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
-use log::{info, warn, error, debug, trace};
+use log::{info, debug, trace};
 use serde::{Deserialize, Serialize};
 
 /// Simple database to store known track IDs

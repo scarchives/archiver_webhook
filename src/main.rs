@@ -496,36 +496,48 @@ async fn poll_user(
         };
         
         // Download and transcode audio
-        let audio_files = match audio::process_track_audio(&track_details, config.temp_dir.as_deref()).await {
-            Ok((mp3, ogg)) => {
+        let processing_result = match audio::process_track_audio(&track_details, config.temp_dir.as_deref()).await {
+            Ok((mp3, ogg, artwork, json)) => {
                 let mut files = Vec::new();
                 
                 if let Some(path) = mp3 {
-                    let file_path = path.clone();
-                    let filename = Path::new(&file_path)
+                    let filename = Path::new(&path)
                         .file_name()
                         .unwrap_or_else(|| std::ffi::OsStr::new("track.mp3"))
                         .to_string_lossy()
                         .to_string();
-                    
-                    info!("Generated MP3 file: {}", filename);
-                    files.push((file_path, filename));
+                    files.push((path, filename));
                 }
                 
                 if let Some(path) = ogg {
-                    let file_path = path.clone();
-                    let filename = Path::new(&file_path)
+                    let filename = Path::new(&path)
                         .file_name()
                         .unwrap_or_else(|| std::ffi::OsStr::new("track.ogg"))
                         .to_string_lossy()
                         .to_string();
-                    
-                    info!("Generated OGG file: {}", filename);
-                    files.push((file_path, filename));
+                    files.push((path, filename));
+                }
+                
+                if let Some(path) = artwork {
+                    let filename = Path::new(&path)
+                        .file_name()
+                        .unwrap_or_else(|| std::ffi::OsStr::new("cover.jpg"))
+                        .to_string_lossy()
+                        .to_string();
+                    files.push((path, filename));
+                }
+                
+                if let Some(path) = json {
+                    let filename = Path::new(&path)
+                        .file_name()
+                        .unwrap_or_else(|| std::ffi::OsStr::new("data.json"))
+                        .to_string_lossy()
+                        .to_string();
+                    files.push((path, filename));
                 }
                 
                 files
-            }
+            },
             Err(e) => {
                 error!("Failed to process audio for track {}: {}", track.id, e);
                 Vec::new()
@@ -533,7 +545,7 @@ async fn poll_user(
         };
         
         // Send to Discord
-        match discord::send_track_webhook(&config.discord_webhook_url, &track_details, Some(audio_files.clone())).await {
+        match discord::send_track_webhook(&config.discord_webhook_url, &track_details, Some(processing_result.clone())).await {
             Ok(_) => {
                 info!("Successfully sent webhook for track: {} by {}", 
                       track_details.title, track_details.user.username);
@@ -545,7 +557,7 @@ async fn poll_user(
         }
         
         // Clean up temp files
-        for (path, _) in audio_files {
+        for (path, _) in processing_result {
             if let Err(e) = audio::delete_temp_file(&path).await {
                 warn!("Failed to clean up temp file {}: {}", path, e);
             }
@@ -631,9 +643,9 @@ async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error::Er
     };
     
     // Download and transcode audio
-    info!("Processing audio for track");
-    let audio_files = match audio::process_track_audio(&track_details, config.temp_dir.as_deref()).await {
-        Ok((mp3, ogg)) => {
+    info!("Processing audio and artwork for track");
+    let processing_result = match audio::process_track_audio(&track_details, config.temp_dir.as_deref()).await {
+        Ok((mp3, ogg, artwork, json)) => {
             let mut files = Vec::new();
             
             if let Some(path) = mp3 {
@@ -660,17 +672,41 @@ async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error::Er
                 files.push((file_path, filename));
             }
             
+            if let Some(path) = artwork {
+                let file_path = path.clone();
+                let filename = Path::new(&file_path)
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("cover.jpg"))
+                    .to_string_lossy()
+                    .to_string();
+                
+                info!("Downloaded artwork: {}", filename);
+                files.push((file_path, filename));
+            }
+            
+            if let Some(path) = json {
+                let file_path = path.clone();
+                let filename = Path::new(&file_path)
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("data.json"))
+                    .to_string_lossy()
+                    .to_string();
+                
+                info!("Saved JSON metadata: {}", filename);
+                files.push((file_path, filename));
+            }
+            
             files
         },
         Err(e) => {
-            error!("Failed to process audio: {}", e);
+            error!("Failed to process track media: {}", e);
             Vec::new() // Continue without audio files
         }
     };
     
     // Send to Discord
     info!("Sending webhook for track: {} by {}", track_details.title, track_details.user.username);
-    match discord::send_track_webhook(&config.discord_webhook_url, &track_details, Some(audio_files.clone())).await {
+    match discord::send_track_webhook(&config.discord_webhook_url, &track_details, Some(processing_result.clone())).await {
         Ok(_) => {
             info!("Successfully sent webhook for track");
             println!("Track successfully posted to Discord: {} by {}", 
@@ -683,7 +719,7 @@ async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error::Er
     }
     
     // Clean up temp files
-    for (path, _) in audio_files {
+    for (path, _) in processing_result {
         if let Err(e) = audio::delete_temp_file(&path).await {
             warn!("Failed to clean up temp file {}: {}", path, e);
         }

@@ -588,4 +588,21 @@ pub async fn resolve_url(url: &str) -> Result<Value, Box<dyn std::error::Error>>
     }
     
     Err(format!("Failed to resolve URL {} after {} retries", url, max_retries).into())
+}
+
+/// Convert artwork URL to get the original high-resolution version
+/// Example: https://i1.sndcdn.com/artworks-ABC123-y07N4g-large.jpg → https://i1.sndcdn.com/artworks-ABC123-y07N4g-original.jpg
+pub fn get_original_artwork_url(artwork_url: &str) -> String {
+    // If the URL contains '-large.jpg', replace it with '-original.jpg'
+    if artwork_url.contains("-large.jpg") {
+        return artwork_url.replace("-large.jpg", "-original.jpg");
+    }
+    
+    // If the URL contains '-t500x500.jpg', replace it with '-original.jpg' (older format)
+    if artwork_url.contains("-t500x500.jpg") {
+        return artwork_url.replace("-t500x500.jpg", "-original.jpg");
+    }
+    
+    // Return the original URL if it doesn't match the expected pattern
+    artwork_url.to_string()
 } 

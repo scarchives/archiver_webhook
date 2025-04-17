@@ -4,15 +4,17 @@ use std::fs;
 use std::env;
 use log::{info, warn, error, debug};
 use tokio::process::Command as TokioCommand;
+use tokio::fs::File as TokioFile;
+use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
-use crate::soundcloud::{Track, get_stream_url};
+use crate::soundcloud::{Track, get_stream_url, get_original_artwork_url};
 
 /// Download and transcode audio from a SoundCloud track
-/// Returns paths to the MP3 and OGG files
+/// Returns paths to the MP3, OGG, Artwork, and JSON metadata files
 pub async fn process_track_audio(
     track: &Track,
     temp_dir: Option<&str>
-) -> Result<(Option<String>, Option<String>), Box<dyn std::error::Error>> {
+) -> Result<(Option<String>, Option<String>, Option<String>, Option<String>), Box<dyn std::error::Error>> {
     // Get the base temp directory
     let base_dir = match temp_dir {
         Some(dir) => {
@@ -33,6 +35,26 @@ pub async fn process_track_audio(
     fs::create_dir_all(&work_dir)?;
     
     info!("Processing audio for track '{}' (ID: {}) in {}", track.title, track.id, work_dir.display());
+    
+    // Save raw track data as JSON
+    let mut json_result = None;
+    let sanitized_title = sanitize_filename(&track.title);
+    let json_path = work_dir.join(format!("{}_data.json", sanitized_title));
+    
+    match save_track_json(track, &json_path).await {
+        Ok(()) => {
+            let file_size = match fs::metadata(&json_path) {
+                Ok(metadata) => metadata.len(),
+                Err(_) => 0,
+            };
+            
+            json_result = Some(json_path.to_string_lossy().to_string());
+            info!("Saved track data as JSON: {} ({} bytes)", json_path.display(), file_size);
+        },
+        Err(e) => {
+            warn!("Failed to save track data as JSON: {}", e);
+        }
+    }
     
     // Resolve the HLS URL if we have one
     let hls_url = match &track.hls_url {
@@ -80,15 +102,43 @@ pub async fn process_track_audio(
         None
     };
     
-    // If we have neither, return error
-    if hls_url.is_none() && stream_url.is_none() {
-        error!("No valid audio URLs found for track {}", track.id);
+    // Download artwork if available
+    let mut artwork_result = None;
+    if let Some(artwork_url) = &track.artwork_url {
+        if !artwork_url.is_empty() {
+            // Get the original high-res image URL
+            let original_url = get_original_artwork_url(artwork_url);
+            info!("Downloading original artwork from: {}", original_url);
+            
+            // Create file path for artwork
+            let artwork_path = work_dir.join(format!("{}_cover.jpg", sanitized_title));
+            
+            // Download the artwork
+            match download_artwork(&original_url, &artwork_path).await {
+                Ok(()) => {
+                    let file_size = match fs::metadata(&artwork_path) {
+                        Ok(metadata) => metadata.len(),
+                        Err(_) => 0,
+                    };
+                    
+                    artwork_result = Some(artwork_path.to_string_lossy().to_string());
+                    info!("Successfully downloaded artwork: {} ({} bytes)", artwork_path.display(), file_size);
+                },
+                Err(e) => {
+                    warn!("Failed to download artwork: {}", e);
+                }
+            }
+        }
+    }
+    
+    // If we have neither audio stream, return error
+    if hls_url.is_none() && stream_url.is_none() && json_result.is_none() && artwork_result.is_none() {
+        error!("No valid audio URLs or data found for track {}", track.id);
         cleanup_temp_dir(&work_dir).await?;
-        return Err("No valid audio URLs found for track".into());
+        return Err("No valid audio URLs or data found for track".into());
     }
     
     // File paths for transcoded files
-    let sanitized_title = sanitize_filename(&track.title);
     let mp3_path = work_dir.join(format!("{}.mp3", sanitized_title));
     let ogg_path = work_dir.join(format!("{}.ogg", sanitized_title));
     
@@ -146,15 +196,15 @@ pub async fn process_track_audio(
         warn!("No HLS URL available for OGG transcoding");
     }
     
-    // If both failed, return error
-    if mp3_result.is_none() && ogg_result.is_none() {
-        error!("All transcoding attempts failed for track {}", track.id);
+    // If everything failed, return error
+    if mp3_result.is_none() && ogg_result.is_none() && artwork_result.is_none() && json_result.is_none() {
+        error!("All processing attempts failed for track {}", track.id);
         cleanup_temp_dir(&work_dir).await?;
-        return Err("Failed to transcode track to any format".into());
+        return Err("Failed to process track".into());
     }
     
-    info!("Audio processing completed for track '{}' (ID: {})", track.title, track.id);
-    Ok((mp3_result, ogg_result))
+    info!("Processing completed for track '{}' (ID: {})", track.title, track.id);
+    Ok((mp3_result, ogg_result, artwork_result, json_result))
 }
 
 /// Transcode a URL to MP3 using ffmpeg
@@ -272,4 +322,55 @@ pub fn check_ffmpeg() -> bool {
             false
         }
     }
+}
+
+/// Download artwork from URL
+async fn download_artwork(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    debug!("Downloading artwork from URL");
+    
+    // Create reqwest client
+    let client = reqwest::Client::new();
+    
+    // Download the image
+    let response = client.get(url)
+        .header("User-Agent", "Mozilla/5.0")
+        .send()
+        .await?;
+    
+    if !response.status().is_success() {
+        return Err(format!("Failed to download artwork: HTTP {}", response.status()).into());
+    }
+    
+    // Get the image data
+    let image_data = response.bytes().await?;
+    
+    // Save to file
+    let mut file = TokioFile::create(output_path).await?;
+    file.write_all(&image_data).await?;
+    
+    debug!("Artwork downloaded successfully to {}", output_path.display());
+    Ok(())
+}
+
+/// Save track data as JSON
+async fn save_track_json(track: &Track, output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    debug!("Saving track data as JSON to {}", output_path.display());
+    
+    // Create a serializable structure with all available data
+    let mut json_data = serde_json::to_value(track)?;
+    
+    // Add raw_data if available
+    if let Some(raw_data) = &track.raw_data {
+        json_data["raw_data"] = raw_data.clone();
+    }
+    
+    // Serialize to pretty JSON
+    let json_string = serde_json::to_string_pretty(&json_data)?;
+    
+    // Save to file
+    let mut file = TokioFile::create(output_path).await?;
+    file.write_all(json_string.as_bytes()).await?;
+    
+    debug!("Track data JSON saved successfully");
+    Ok(())
 } 
