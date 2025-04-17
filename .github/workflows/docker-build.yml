@@ -1,4 +1,4 @@
-name: Build and Push Docker Image
+name: Build Latest Docker Image
 
 on:
   push:
@@ -20,47 +20,40 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v2
 
-      - name: Docker metadata
-        id: meta
-        uses: docker/metadata-action@v4
-        with:
-          images: ghcr.io/SCArchive/scarchivebot
-          tags: |
-            type=ref,event=branch
-            type=ref,event=pr
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=sha,format=long
-            type=sha,format=short
-            type=raw,value=latest,enable={{is_default_branch}}
-            type=raw,value=snapshot,enable={{is_default_branch}}
-
       - name: Log in to GitHub Container Registry
-        if: github.event_name != 'pull_request'
         uses: docker/login-action@v2
         with:
           registry: ghcr.io
-          username: SCArchive
+          username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Extract version from Cargo.toml
-        id: version
+      # Create an empty Cargo.lock file if it doesn't exist
+      - name: Check/Create Cargo.lock
         run: |
-          VERSION=$(grep -m1 version Cargo.toml | sed -e 's/.*version\s*=\s*"\([^"]*\)".*/\1/')
-          echo "VERSION=$VERSION" >> $GITHUB_ENV
-          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          if [ ! -f "Cargo.lock" ]; then
+            echo "Creating empty Cargo.lock file"
+            touch Cargo.lock
+          fi
 
+      # Get the commit SHA for the tag
+      - name: Get commit info
+        id: commit_info
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "Using commit SHA: $SHA"
+
+      # Build and push the latest image only
       - name: Build and push
-        uses: docker/build-push-action@v4
+        uses: docker/build-push-action@v3
         with:
           context: .
-          push: ${{ github.event_name != 'pull_request' }}
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
+          push: true
+          tags: |
+            ghcr.io/SCArchive/scarchivebot:latest
+            ghcr.io/SCArchive/scarchivebot:${{ steps.commit_info.outputs.sha }}
           build-args: |
-            VERSION=${{ env.VERSION }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
+            VERSION=latest
 
       - name: Image digest
         run: echo ${{ steps.build-and-push.outputs.digest }} 

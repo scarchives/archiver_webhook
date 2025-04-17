@@ -1,7 +1,7 @@
-FROM rust:1.76-slim-bullseye as builder
+FROM rust:1.70-slim-bullseye as builder
 
 # Accept version argument from build command
-ARG VERSION=dev
+ARG VERSION=latest
 
 WORKDIR /app
 
@@ -11,17 +11,12 @@ RUN apt-get update && apt-get install -y \
     libssl-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# Copy Cargo files first to cache dependencies
-COPY Cargo.toml Cargo.lock ./
-
-# Create a dummy main.rs to build dependencies
-RUN mkdir -p src && \
-    echo "fn main() {}" > src/main.rs && \
-    cargo build --release && \
-    rm -rf src
-
-# Copy actual source code
+# Copy source code
 COPY src/ src/
+COPY Cargo.toml ./
+
+# Create an empty Cargo.lock file if it doesn't exist
+RUN touch Cargo.lock
 
 # Build the application
 RUN cargo build --release
@@ -29,7 +24,7 @@ RUN cargo build --release
 FROM debian:bullseye-slim
 
 # Accept version argument from builder stage
-ARG VERSION=dev
+ARG VERSION=latest
 
 WORKDIR /app
 

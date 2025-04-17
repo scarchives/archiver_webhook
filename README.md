@@ -116,7 +116,7 @@ Valid log levels: `trace`, `debug`, `info`, `warn`, `error`
 
 #### Using Pre-built Image
 
-You can use the pre-built Docker image from GitHub Container Registry:
+You can use the Docker image from GitHub Container Registry, which is automatically updated with every push to the master branch:
 
 ```bash
 # Pull the latest image
@@ -131,6 +131,10 @@ docker run -d --name scarchivebot \
   -e RUST_LOG=info \
   ghcr.io/SCArchive/scarchivebot:latest
 ```
+
+Available tags:
+- `latest` - Always points to the most recent build from the master branch
+- `<commit-sha>` - Points to a specific commit (useful for pinning to a specific version)
 
 #### Using Docker Compose (recommended)
 

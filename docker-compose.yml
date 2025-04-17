@@ -2,9 +2,14 @@ version: '3'
 
 services:
   scarchivebot:
-    build:
-      context: .
-      dockerfile: Dockerfile
+    # Use the pre-built image from GitHub Container Registry
+    image: ghcr.io/SCArchive/scarchivebot:latest
+    
+    # Uncomment these lines to build locally instead of using the pre-built image
+    # build:
+    #   context: .
+    #   dockerfile: Dockerfile
+    
     container_name: scarchivebot
     restart: unless-stopped
     volumes:
