@@ -64,14 +64,16 @@ fn build_track_embed(track: &Track) -> Value {
     );
     
     // Extract additional metadata from raw_data if available
-    let mut description = track.description.clone().unwrap_or_default();
-    let mut play_count = None;
-    let mut likes_count = None;
-    let mut reposts_count = None;
-    let mut comment_count = None;
-    let mut genre = None;
-    let mut tags = None;
-    let mut downloadable = false;
+    let description = track.description.clone().unwrap_or_default();
+    
+    // These values will be populated from either raw_data or track struct directly
+    let play_count: Option<u64>;
+    let likes_count: Option<u64>;
+    let reposts_count: Option<u64>;
+    let comment_count: Option<u64>;
+    let genre: Option<String>;
+    let tags: Option<String>;
+    let downloadable: bool;
     
     if let Some(raw_data) = &track.raw_data {
         // Get play count

@@ -399,7 +399,7 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
     
     // Track stats
     let mut total_polls = 0;
-    let mut total_tracks_found = 0;
+    let total_new_tracks_overall = 0;
     let mut last_stats_time = std::time::Instant::now();
     
     loop {
@@ -411,7 +411,7 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
         let now = std::time::Instant::now();
         if now.duration_since(last_stats_time).as_secs() > 3600 {
             info!("Stats: {} polls completed, {} new tracks found", 
-                 total_polls, total_tracks_found);
+                 total_polls, total_new_tracks_overall);
             last_stats_time = now;
         }
         
@@ -459,8 +459,8 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
             // Wait for all tasks in this batch to complete
             for task in tasks {
                 match task.await {
-                    Ok((user_id, Ok(count))) => total_new_tracks += count,
-                    Ok((user_id, Err(_))) => {
+                    Ok((_user_id, Ok(count))) => total_new_tracks += count,
+                    Ok((_user_id, Err(_))) => {
                         // Error already logged in poll_user
                     },
                     Err(e) => {
@@ -474,7 +474,7 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
 
         // Save the database after all users have been processed
         {
-            let mut db_guard = db.lock().await;
+            let db_guard = db.lock().await;
             if let Err(e) = db_guard.save() {
                 warn!("Failed to save tracks database: {}", e);
             }
