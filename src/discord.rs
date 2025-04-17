@@ -206,7 +206,7 @@ fn build_track_embed(track: &Track) -> Value {
         "color": 0xFF7700, // SoundCloud orange
         "footer": {
             "text": "Archived via SoundCloud Archiver",
-            "icon_url": "https://developers.soundcloud.com/assets/logo_black.png"
+            "icon_url": "https://developers.soundcloud.com/assets/logo_big_white-65c2b096da68dd533db18b9f07d14054.png"
         },
         "author": {
             "name": track.user.username.clone(),
@@ -231,7 +231,6 @@ async fn send_embed_only(
     let payload = json!({
         "embeds": [embed],
         "username": "SoundCloud Archiver",
-        "avatar_url": "https://developers.soundcloud.com/assets/logo_big_orange.png"
     });
     
     debug!("Sending webhook POST request to Discord");
@@ -268,7 +267,6 @@ async fn send_with_audio_files(
         .text("payload_json", json!({
             "embeds": [embed],
             "username": "SoundCloud Archiver",
-            "avatar_url": "https://developers.soundcloud.com/assets/logo_big_orange.png"
         }).to_string());
     
     // Add each audio file

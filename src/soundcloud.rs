@@ -349,7 +349,7 @@ fn parse_track_user(track_json: &Value) -> TrackUser {
                 .to_string(),
             avatar_url: user.get("avatar_url")
                 .and_then(Value::as_str)
-                .map(String::from),
+            .map(|url| get_original_artwork_url(url)),
         }
     } else {
         // Default user if not found
@@ -440,7 +440,7 @@ pub async fn get_track_details(
             .to_string(),
         artwork_url: json.get("artwork_url")
             .and_then(Value::as_str)
-            .map(String::from),
+            .map(|url| get_original_artwork_url(url)),
         description: json.get("description")
             .and_then(Value::as_str)
             .map(String::from),
