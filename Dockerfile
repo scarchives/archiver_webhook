@@ -1,7 +1,7 @@
-FROM rust:1.86-alpine AS builder
+FROM rust:1.86-slim AS builder
 
 # Install build dependencies
-RUN apk add --no-cache build-base pkgconfig openssl-dev
+RUN apt-get update && apt-get install -y build-essential pkg-config libssl-dev
 
 WORKDIR /app
 
