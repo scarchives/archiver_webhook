@@ -1,0 +1,38 @@
+# Git
+.git
+.gitignore
+
+# Generated files
+target/
+Cargo.lock
+*.o
+*.a
+*.so
+*.dylib
+
+# Config and data files (these will be mounted at runtime)
+config.json
+users.json
+tracks.json
+
+# Temp files
+temp/
+tmp/
+
+# IDE files
+.idea/
+.vscode/
+*.iml
+*.swp
+
+# Documentation
+docs/
+*.md
+
+# Tests
+tests/
+examples/
+
+# Docker files
+.dockerignore
+docker-compose*.yml 

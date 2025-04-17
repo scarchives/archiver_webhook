@@ -15,10 +15,17 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
 
 ## Requirements
 
+### Standard Installation
 - Rust 1.70+
 - `ffmpeg` command line utility must be in your PATH for audio transcoding
 
+### Docker Installation
+- Docker
+- Docker Compose (optional)
+
 ## Setup
+
+### Standard Installation
 
 1. Clone the repository
 2. Build with Cargo:
@@ -46,6 +53,18 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
    }
    ```
 
+### Docker Installation
+
+1. Make sure Docker is installed on your system
+2. Create the required configuration files in your project directory:
+   - `config.json` (same format as above, but set `"temp_dir": "/app/temp"`)
+   - `users.json` (same format as above)
+   - Create an empty `tracks.json` file or let the application create it
+3. Create a `temp` directory for temporary files:
+   ```bash
+   mkdir -p temp
+   ```
+
 ## Configuration Options
 
 - `discord_webhook_url` (required): The Discord webhook URL to send track notifications to
@@ -56,6 +75,8 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
 - `temp_dir` (optional): Directory for temporary files (if not specified, system temp dir is used)
 
 ## Usage
+
+### Standard Installation
 
 Run the application in watcher mode (default):
 
@@ -90,6 +111,105 @@ RUST_LOG=info ./scarchivebot
 ```
 
 Valid log levels: `trace`, `debug`, `info`, `warn`, `error`
+
+### Docker Installation
+
+#### Using Pre-built Image
+
+You can use the pre-built Docker image from GitHub Container Registry:
+
+```bash
+# Pull the latest image
+docker pull ghcr.io/SCArchive/scarchivebot:latest
+
+# Run with your configuration files
+docker run -d --name scarchivebot \
+  -v "$(pwd)/config.json:/app/config.json:ro" \
+  -v "$(pwd)/users.json:/app/users.json:rw" \
+  -v "$(pwd)/tracks.json:/app/tracks.json:rw" \
+  -v "$(pwd)/temp:/app/temp:rw" \
+  -e RUST_LOG=info \
+  ghcr.io/SCArchive/scarchivebot:latest
+```
+
+#### Using Docker Compose (recommended)
+
+Create a `docker-compose.yml` file:
+
+```yaml
+version: '3'
+
+services:
+  scarchivebot:
+    image: ghcr.io/SCArchive/scarchivebot:latest
+    container_name: scarchivebot
+    restart: unless-stopped
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./users.json:/app/users.json:rw
+      - ./tracks.json:/app/tracks.json:rw
+      - ./temp:/app/temp:rw
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+    # By default, run in watcher mode
+    command: ""
+```
+
+Then run:
+
+```bash
+docker-compose up -d
+```
+
+View logs:
+
+```bash
+docker-compose logs -f
+```
+
+Run one-time commands:
+
+```bash
+# Resolve a SoundCloud URL
+docker-compose run --rm scarchivebot --resolve https://soundcloud.com/artist/track-name
+
+# Initialize tracks database
+docker-compose run --rm scarchivebot --init-tracks
+
+# Post a specific track
+docker-compose run --rm scarchivebot --post-track 1234567890
+```
+
+#### Building the Image Locally
+
+Build the image:
+
+```bash
+docker build -t scarchivebot .
+```
+
+Run in watcher mode:
+
+```bash
+docker run -d --name scarchivebot \
+  -v "$(pwd)/config.json:/app/config.json:ro" \
+  -v "$(pwd)/users.json:/app/users.json:rw" \
+  -v "$(pwd)/tracks.json:/app/tracks.json:rw" \
+  -v "$(pwd)/temp:/app/temp:rw" \
+  -e RUST_LOG=info \
+  scarchivebot
+```
+
+Run one-time commands:
+
+```bash
+docker run --rm \
+  -v "$(pwd)/config.json:/app/config.json:ro" \
+  -v "$(pwd)/users.json:/app/users.json:rw" \
+  -v "$(pwd)/tracks.json:/app/tracks.json:rw" \
+  -v "$(pwd)/temp:/app/temp:rw" \
+  scarchivebot --resolve https://soundcloud.com/artist/track-name
+```
 
 ## How to Find SoundCloud User IDs
 

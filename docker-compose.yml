@@ -1,0 +1,18 @@
+version: '3'
+
+services:
+  scarchivebot:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scarchivebot
+    restart: unless-stopped
+    volumes:
+      - ./config.json:/app/config.json:ro
+      - ./users.json:/app/users.json:rw
+      - ./tracks.json:/app/tracks.json:rw
+      - ./temp:/app/temp:rw
+    environment:
+      - RUST_LOG=${RUST_LOG:-info}
+    # By default, run in watcher mode (remove this line to see help options)
+    command: "" 
