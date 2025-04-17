@@ -8,13 +8,14 @@ use tokio::fs::File as TokioFile;
 use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 use crate::soundcloud::{Track, get_stream_url};
+use lazy_static;
 
 /// Download and transcode audio from a SoundCloud track
 /// Returns paths to the MP3, OGG, Artwork, and JSON metadata files
 pub async fn process_track_audio(
     track: &Track,
     temp_dir: Option<&str>
-) -> Result<(Option<String>, Option<String>, Option<String>, Option<String>), Box<dyn std::error::Error>> {
+) -> Result<(Option<String>, Option<String>, Option<String>, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
     // Get the base temp directory
     let base_dir = match temp_dir {
         Some(dir) => {
@@ -207,7 +208,7 @@ pub async fn process_track_audio(
 }
 
 /// Transcode a URL to MP3 using ffmpeg
-async fn transcode_to_mp3(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+async fn transcode_to_mp3(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Executing ffmpeg MP3 transcoding command");
     let mut cmd = TokioCommand::new("ffmpeg");
     cmd.arg("-i")
@@ -236,7 +237,7 @@ async fn transcode_to_mp3(url: &str, output_path: &Path) -> Result<(), Box<dyn s
 }
 
 /// Transcode a URL to OGG/Opus using ffmpeg
-async fn transcode_to_ogg(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+async fn transcode_to_ogg(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Executing ffmpeg OGG/Opus transcoding command");
     let mut cmd = TokioCommand::new("ffmpeg");
     cmd.arg("-i")
@@ -265,7 +266,7 @@ async fn transcode_to_ogg(url: &str, output_path: &Path) -> Result<(), Box<dyn s
 }
 
 /// Clean up temporary files after processing
-pub async fn cleanup_temp_dir(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn cleanup_temp_dir(dir: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if dir.exists() && dir.is_dir() {
         debug!("Cleaning up temporary directory: {}", dir.display());
         match fs::remove_dir_all(dir) {
@@ -279,7 +280,7 @@ pub async fn cleanup_temp_dir(dir: &Path) -> Result<(), Box<dyn std::error::Erro
 }
 
 /// Delete a temporary file
-pub async fn delete_temp_file(path: &str) -> Result<(), Box<dyn std::error::Error>> {
+pub async fn delete_temp_file(path: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     let p = Path::new(path);
     if p.exists() && p.is_file() {
         debug!("Deleting temporary file: {}", p.display());
@@ -324,11 +325,11 @@ pub fn check_ffmpeg() -> bool {
 }
 
 /// Download artwork from URL
-async fn download_artwork(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+async fn download_artwork(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Downloading artwork from URL");
     
     // Create reqwest client
-    let client = reqwest::Client::new();
+    let client = &HTTP_CLIENT;
     
     // Download the image
     let response = client.get(url)
@@ -352,7 +353,7 @@ async fn download_artwork(url: &str, output_path: &Path) -> Result<(), Box<dyn s
 }
 
 /// Save track data as JSON
-async fn save_track_json(track: &Track, output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
+async fn save_track_json(track: &Track, output_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Saving track data as JSON to {}", output_path.display());
     
     // Create a serializable structure with all available data
@@ -372,4 +373,9 @@ async fn save_track_json(track: &Track, output_path: &Path) -> Result<(), Box<dy
     
     debug!("Track data JSON saved successfully");
     Ok(())
+}
+
+// Add a lazy_static HTTP client
+lazy_static::lazy_static! {
+    static ref HTTP_CLIENT: reqwest::Client = reqwest::Client::new();
 } 

@@ -26,7 +26,7 @@ impl TrackDatabase {
     }
     
     /// Load from file or create a new instance
-    pub fn load_or_create(db_path: String) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load_or_create(db_path: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         if Path::new(&db_path).exists() {
             // Load database from file
             debug!("Loading tracks database from {}", db_path);
@@ -50,7 +50,7 @@ impl TrackDatabase {
     }
     
     /// Save database to file
-    pub fn save(&self) -> Result<(), Box<dyn std::error::Error>> {
+    pub fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         debug!("Saving tracks database to {}", self.db_path);
         let file = File::create(&self.db_path)?;
         let writer = BufWriter::new(file);

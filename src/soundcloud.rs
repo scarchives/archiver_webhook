@@ -1,5 +1,4 @@
-use std::sync::atomic::{AtomicPtr, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 use std::time::Duration;
 use log::{info, warn, error, debug};
 use regex::Regex;
@@ -58,7 +57,7 @@ pub struct TrackUser {
 }
 
 /// Initialize the SoundCloud client
-pub async fn initialize() -> Result<(), Box<dyn std::error::Error>> {
+pub async fn initialize() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Generate the initial client ID
     info!("Initializing SoundCloud client...");
     let initial_id = generate_client_id().await?;
@@ -78,7 +77,7 @@ pub fn get_client_id() -> Option<String> {
 }
 
 /// Refresh the SoundCloud client ID
-pub async fn refresh_client_id() -> Result<String, Box<dyn std::error::Error>> {
+pub async fn refresh_client_id() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
     let new_id = generate_client_id().await?;
     
     // Update the global cache
@@ -98,8 +97,8 @@ pub async fn refresh_client_id() -> Result<String, Box<dyn std::error::Error>> {
 }
 
 /// Generate a new SoundCloud client ID by scraping the website
-async fn generate_client_id() -> Result<String, Box<dyn std::error::Error>> {
-    let client = Client::new();
+async fn generate_client_id() -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let client = &HTTP_CLIENT;
     
     debug!("Fetching SoundCloud homepage to extract client ID...");
     // Fetch the SoundCloud homepage
@@ -162,8 +161,8 @@ async fn generate_client_id() -> Result<String, Box<dyn std::error::Error>> {
 pub async fn get_user_tracks(
     user_id: &str, 
     limit: usize
-) -> Result<Vec<Track>, Box<dyn std::error::Error>> {
-    let client = Client::new();
+) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
+    let client = &HTTP_CLIENT;
     let mut tracks = Vec::new();
     let mut offset = 0;
     let chunk_size = 50; // API limit per request
@@ -370,8 +369,8 @@ fn parse_track_user(track_json: &Value) -> TrackUser {
 /// Get detailed information for a track including stream URLs
 pub async fn get_track_details(
     track_id: &str
-) -> Result<Track, Box<dyn std::error::Error>> {
-    let client = Client::new();
+) -> Result<Track, Box<dyn std::error::Error + Send + Sync>> {
+    let client = &HTTP_CLIENT;
     
     // Get the current client ID or refresh it
     let mut client_id = match get_client_id() {
@@ -379,7 +378,7 @@ pub async fn get_track_details(
         None => refresh_client_id().await?,
     };
     
-    let mut max_retries = 3;
+    let max_retries = 3;
     let mut json_response = None;
     
     for retry in 0..max_retries {
@@ -483,7 +482,6 @@ pub async fn get_track_details(
         if let Some(transcodings) = media.get("transcodings").and_then(Value::as_array) {
             for transcoding in transcodings {
                 let format = transcoding.get("format").and_then(|f| f.get("protocol")).and_then(Value::as_str);
-                let preset = transcoding.get("preset").and_then(Value::as_str);
                 
                 // Look for HLS streams specifically
                 if let (Some("hls"), Some(url)) = (format, transcoding.get("url").and_then(Value::as_str)) {
@@ -502,8 +500,8 @@ pub async fn get_track_details(
 }
 
 /// Resolve the actual download/stream URL for a track
-pub async fn get_stream_url(url: &str) -> Result<String, Box<dyn std::error::Error>> {
-    let client = Client::new();
+pub async fn get_stream_url(url: &str) -> Result<String, Box<dyn std::error::Error + Send + Sync>> {
+    let client = &HTTP_CLIENT;
     
     // Get the current client ID or refresh it
     let client_id = match get_client_id() {
@@ -534,8 +532,8 @@ pub async fn get_stream_url(url: &str) -> Result<String, Box<dyn std::error::Err
 }
 
 /// Resolve a SoundCloud URL to a track/user ID
-pub async fn resolve_url(url: &str) -> Result<Value, Box<dyn std::error::Error>> {
-    let client = Client::new();
+pub async fn resolve_url(url: &str) -> Result<Value, Box<dyn std::error::Error + Send + Sync>> {
+    let client = &HTTP_CLIENT;
     
     // Get the current client ID or refresh it
     let mut client_id = match get_client_id() {
@@ -543,7 +541,7 @@ pub async fn resolve_url(url: &str) -> Result<Value, Box<dyn std::error::Error>>
         None => refresh_client_id().await?,
     };
     
-    let mut max_retries = 3;
+    let max_retries = 3;
     
     for retry in 0..max_retries {
         if retry > 0 {

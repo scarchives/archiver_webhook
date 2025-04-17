@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use std::env;
-use log::{info, warn, error, debug, trace};
+use log::{info, warn, error, debug};
 use tokio::sync::Mutex;
 use simple_logger;
 use log::LevelFilter;
@@ -15,10 +15,9 @@ mod soundcloud;
 
 use config::{Config, Users};
 use db::TrackDatabase;
-use soundcloud::Track;
 
 #[tokio::main]
-async fn main() -> Result<(), Box<dyn std::error::Error>> {
+async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize logger
     setup_logger();
     info!("[scarchivebot] Starting up v{}", env!("CARGO_PKG_VERSION"));
@@ -94,7 +93,7 @@ fn log_system_info() {
 }
 
 /// Resolve a SoundCloud URL and display information
-async fn resolve_soundcloud_url(url: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn resolve_soundcloud_url(url: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     info!("Resolving SoundCloud URL: {}", url);
     
     // Initialize SoundCloud client
@@ -215,7 +214,7 @@ async fn resolve_soundcloud_url(url: &str) -> Result<(), Box<dyn std::error::Err
 }
 
 /// Initialize tracks database with all existing tracks from all users
-async fn initialize_tracks_database() -> Result<(), Box<dyn std::error::Error>> {
+async fn initialize_tracks_database() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Load config
     let config_path = "config.json";
     info!("Loading configuration from {}", config_path);
@@ -317,7 +316,7 @@ async fn initialize_tracks_database() -> Result<(), Box<dyn std::error::Error>> 
 }
 
 /// Run the bot in watcher mode (continuous monitoring)
-async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error>> {
+async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Load config
     let config_path = "config.json";
     info!("Loading configuration from {}", config_path);
@@ -418,34 +417,74 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error>> {
         
         debug!("Poll #{}: Checking for new tracks", total_polls);
         
-        // For each user, check for new tracks
-        for user_id in &users.users {
-            trace!("Polling user {}", user_id);
-            match poll_user(&config, user_id, &db).await {
-                Ok(new_count) => {
-                    total_tracks_found += new_count;
-                    
-                    if new_count > 0 {
-                        info!("Found {} new tracks for user {}", new_count, user_id);
-                    } else {
-                        debug!("No new tracks for user {}", user_id);
+        // Process users in parallel batches
+        let users_vec = users.users.clone();
+        let mut users_processed = 0;
+        let mut total_new_tracks = 0;
+
+        while users_processed < users_vec.len() {
+            let batch_size = std::cmp::min(
+                config.max_parallel_fetches,
+                users_vec.len() - users_processed
+            );
+            
+            let mut tasks = Vec::with_capacity(batch_size);
+            
+            // Create tasks for this batch
+            for i in 0..batch_size {
+                let user_id = users_vec[users_processed + i].clone();
+                let config_clone = config.clone();
+                let db_clone = db.clone();
+                
+                let task = tokio::spawn(async move {
+                    match poll_user(&config_clone, &user_id, &db_clone).await {
+                        Ok(new_count) => {
+                            if new_count > 0 {
+                                info!("Found {} new tracks for user {}", new_count, user_id);
+                            } else {
+                                debug!("No new tracks for user {}", user_id);
+                            }
+                            (user_id, Ok(new_count))
+                        }
+                        Err(e) => {
+                            error!("Error polling user {}: {}", user_id, e);
+                            (user_id, Err(e))
+                        }
+                    }
+                });
+                
+                tasks.push(task);
+            }
+            
+            // Wait for all tasks in this batch to complete
+            for task in tasks {
+                match task.await {
+                    Ok((user_id, Ok(count))) => total_new_tracks += count,
+                    Ok((user_id, Err(_))) => {
+                        // Error already logged in poll_user
+                    },
+                    Err(e) => {
+                        error!("Task join error: {}", e);
                     }
                 }
-                Err(e) => {
-                    error!("Error polling user {}: {}", user_id, e);
-                }
             }
+            
+            users_processed += batch_size;
         }
-        
-        // Save the database after each poll
+
+        // Save the database after all users have been processed
         {
             let mut db_guard = db.lock().await;
             if let Err(e) = db_guard.save() {
                 warn!("Failed to save tracks database: {}", e);
             }
         }
-        
-        debug!("Poll #{} completed", total_polls);
+
+        if total_new_tracks > 0 {
+            info!("Poll #{} completed: {} new tracks found", total_polls, total_new_tracks);
+        } else {
+            debug!("Poll #{} completed: no new tracks", total_polls);
+        }
     }
 }
 
@@ -454,7 +493,7 @@ async fn poll_user(
     config: &Config,
     user_id: &str,
     db: &Arc<Mutex<TrackDatabase>>,
-) -> Result<usize, Box<dyn std::error::Error>> {
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     // Fetch latest tracks from SoundCloud
     let tracks = match soundcloud::get_user_tracks(user_id, config.max_tracks_per_user).await {
         Ok(t) => t,
@@ -573,7 +612,7 @@ async fn poll_user(
 }
 
 /// Post a single track to the webhook without checking the database
-async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Load config
     let config_path = "config.json";
     info!("Loading configuration from {}", config_path);

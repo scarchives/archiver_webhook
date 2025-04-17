@@ -4,7 +4,7 @@ use std::io::BufReader;
 use std::path::Path;
 use log::{info, warn};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
     // Discord webhook URL for sending notifications
     pub discord_webhook_url: String,
@@ -25,6 +25,9 @@ pub struct Config {
     pub max_tracks_per_user: usize,
     // Temp directory for downloads (uses system temp if not specified)
     pub temp_dir: Option<String>,
+    /// Maximum number of parallel user fetches
+    #[serde(default = "default_max_parallel_fetches")]
+    pub max_parallel_fetches: usize,
 }
 
 fn default_poll_interval() -> u64 {
@@ -48,6 +51,10 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
+fn default_max_parallel_fetches() -> usize {
+    4
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -58,6 +65,7 @@ impl Default for Config {
             tracks_file: default_tracks_file(),
             max_tracks_per_user: default_max_tracks_per_user(),
             temp_dir: None,
+            max_parallel_fetches: default_max_parallel_fetches(),
         }
     }
 }
@@ -68,7 +76,7 @@ pub struct Users {
 }
 
 impl Config {
-    pub fn load(config_path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load(config_path: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         if !Path::new(config_path).exists() {
             warn!("Config file not found at {}, creating default config", config_path);
             let default_config = Config::default();
@@ -92,7 +100,7 @@ impl Config {
 }
 
 impl Users {
-    pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error>> {
+    pub fn load(path: &str) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         if !Path::new(path).exists() {
             warn!("Users file not found at {}, creating empty list", path);
             let empty_users = Users { users: Vec::new() };

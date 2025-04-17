@@ -12,7 +12,7 @@ pub async fn send_track_webhook(
     webhook_url: &str, 
     track: &Track,
     audio_files: Option<Vec<(String, String)>> // Vec of (file_path, file_name)
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Create the webhook client
     let client = Client::new();
     
@@ -216,7 +216,7 @@ async fn send_embed_only(
     client: Client, 
     webhook_url: &str, 
     embed: Value
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Preparing embed-only Discord webhook request");
     
     let payload = json!({
@@ -250,7 +250,7 @@ async fn send_with_audio_files(
     webhook_url: &str,
     embed: Value,
     files: Vec<(String, String)> // Vec of (file_path, file_name)
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Preparing multipart request with {} audio files", files.len());
     
     // Create a multipart form

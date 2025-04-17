@@ -10,7 +10,7 @@ pub use db::TrackDatabase;
 pub use soundcloud::Track;
 
 /// Initialize the application with the given config file
-pub async fn initialize(config_path: &str) -> Result<(Config, Users, db::TrackDatabase), Box<dyn std::error::Error>> {
+pub async fn initialize(config_path: &str) -> Result<(Config, Users, db::TrackDatabase), Box<dyn std::error::Error + Send + Sync>> {
     // Check for ffmpeg
     if !audio::check_ffmpeg() {
         log::warn!("ffmpeg not found in PATH, audio transcoding will not work!");
