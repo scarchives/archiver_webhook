@@ -11,10 +11,10 @@ COPY . .
 # Build the application
 RUN cargo build --release
 
-FROM alpine:3.21
+FROM debian:bookworm-slim
 
 # Install runtime dependencies
-RUN apk add --no-cache ffmpeg ca-certificates && \
+RUN apt-get update && apt-get install -y ffmpeg ca-certificates && \
     mkdir -p /app/temp
 
 WORKDIR /app
