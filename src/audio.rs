@@ -15,23 +15,39 @@ pub async fn process_track_audio(
 ) -> Result<(Option<String>, Option<String>), Box<dyn std::error::Error>> {
     // Get the base temp directory
     let base_dir = match temp_dir {
-        Some(dir) => PathBuf::from(dir),
-        None => env::temp_dir(),
+        Some(dir) => {
+            debug!("Using specified temp directory: {}", dir);
+            PathBuf::from(dir)
+        },
+        None => {
+            let sys_temp = env::temp_dir();
+            debug!("Using system temp directory: {}", sys_temp.display());
+            sys_temp
+        },
     };
     
     // Create a unique subfolder for this download
     let unique_id = Uuid::new_v4().to_string();
     let work_dir = base_dir.join(format!("scarchive_{}", unique_id));
+    debug!("Creating work directory: {}", work_dir.display());
     fs::create_dir_all(&work_dir)?;
     
-    info!("Processing audio for track {} in {}", track.id, work_dir.display());
+    info!("Processing audio for track '{}' (ID: {}) in {}", track.title, track.id, work_dir.display());
     
     // Resolve the HLS URL if we have one
     let hls_url = match &track.hls_url {
         Some(url) => {
-            let resolved = get_stream_url(url).await?;
-            info!("Resolved HLS URL for track {}", track.id);
-            Some(resolved)
+            debug!("Resolving HLS URL for track {}", track.id);
+            match get_stream_url(url).await {
+                Ok(resolved) => {
+                    info!("Successfully resolved HLS URL for track {}", track.id);
+                    Some(resolved)
+                },
+                Err(e) => {
+                    warn!("Failed to resolve HLS URL for track {}: {}", track.id, e);
+                    None
+                }
+            }
         },
         None => {
             warn!("No HLS URL available for track {}, checking other streams", track.id);
@@ -43,9 +59,17 @@ pub async fn process_track_audio(
     let stream_url = if hls_url.is_none() {
         match &track.stream_url {
             Some(url) => {
-                let resolved = get_stream_url(url).await?;
-                info!("Resolved stream URL for track {}", track.id);
-                Some(resolved)
+                debug!("Resolving stream URL for track {}", track.id);
+                match get_stream_url(url).await {
+                    Ok(resolved) => {
+                        info!("Successfully resolved stream URL for track {}", track.id);
+                        Some(resolved)
+                    },
+                    Err(e) => {
+                        warn!("Failed to resolve stream URL for track {}: {}", track.id, e);
+                        None
+                    }
+                }
             },
             None => {
                 warn!("No stream URL available for track {}", track.id);
@@ -58,13 +82,17 @@ pub async fn process_track_audio(
     
     // If we have neither, return error
     if hls_url.is_none() && stream_url.is_none() {
+        error!("No valid audio URLs found for track {}", track.id);
         cleanup_temp_dir(&work_dir).await?;
         return Err("No valid audio URLs found for track".into());
     }
     
     // File paths for transcoded files
-    let mp3_path = work_dir.join(format!("{}.mp3", sanitize_filename(&track.title)));
-    let ogg_path = work_dir.join(format!("{}.ogg", sanitize_filename(&track.title)));
+    let sanitized_title = sanitize_filename(&track.title);
+    let mp3_path = work_dir.join(format!("{}.mp3", sanitized_title));
+    let ogg_path = work_dir.join(format!("{}.ogg", sanitized_title));
+    
+    debug!("Output file paths: MP3={}, OGG={}", mp3_path.display(), ogg_path.display());
     
     // Try to transcode to both formats
     let mut mp3_result = None;
@@ -72,74 +100,118 @@ pub async fn process_track_audio(
     
     // Process MP3 (preferring HLS if available)
     if let Some(url) = hls_url.as_ref().or(stream_url.as_ref()) {
-        debug!("Transcoding to MP3: {}", mp3_path.display());
-        if transcode_to_mp3(url, &mp3_path).await.is_ok() {
-            mp3_result = Some(mp3_path.to_string_lossy().to_string());
-            info!("Successfully transcoded to MP3: {}", mp3_path.display());
-        } else {
-            warn!("Failed to transcode to MP3");
+        info!("Starting MP3 transcoding for track {}", track.id);
+        debug!("Input URL: {}", url);
+        debug!("Output path: {}", mp3_path.display());
+        
+        match transcode_to_mp3(url, &mp3_path).await {
+            Ok(_) => {
+                let file_size = match fs::metadata(&mp3_path) {
+                    Ok(metadata) => metadata.len(),
+                    Err(_) => 0,
+                };
+                
+                mp3_result = Some(mp3_path.to_string_lossy().to_string());
+                info!("Successfully transcoded to MP3: {} ({} bytes)", mp3_path.display(), file_size);
+            },
+            Err(e) => {
+                error!("Failed to transcode to MP3: {}", e);
+            }
         }
+    } else {
+        warn!("No URL available for MP3 transcoding");
     }
     
     // Process OGG (only from HLS for better quality)
     if let Some(url) = &hls_url {
-        debug!("Transcoding to OGG: {}", ogg_path.display());
-        if transcode_to_ogg(url, &ogg_path).await.is_ok() {
-            ogg_result = Some(ogg_path.to_string_lossy().to_string());
-            info!("Successfully transcoded to OGG: {}", ogg_path.display());
-        } else {
-            warn!("Failed to transcode to OGG");
+        info!("Starting OGG transcoding for track {}", track.id);
+        debug!("Input URL: {}", url);
+        debug!("Output path: {}", ogg_path.display());
+        
+        match transcode_to_ogg(url, &ogg_path).await {
+            Ok(_) => {
+                let file_size = match fs::metadata(&ogg_path) {
+                    Ok(metadata) => metadata.len(),
+                    Err(_) => 0,
+                };
+                
+                ogg_result = Some(ogg_path.to_string_lossy().to_string());
+                info!("Successfully transcoded to OGG: {} ({} bytes)", ogg_path.display(), file_size);
+            },
+            Err(e) => {
+                error!("Failed to transcode to OGG: {}", e);
+            }
         }
+    } else {
+        warn!("No HLS URL available for OGG transcoding");
     }
     
     // If both failed, return error
     if mp3_result.is_none() && ogg_result.is_none() {
+        error!("All transcoding attempts failed for track {}", track.id);
         cleanup_temp_dir(&work_dir).await?;
         return Err("Failed to transcode track to any format".into());
     }
     
+    info!("Audio processing completed for track '{}' (ID: {})", track.title, track.id);
     Ok((mp3_result, ogg_result))
 }
 
 /// Transcode a URL to MP3 using ffmpeg
 async fn transcode_to_mp3(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let status = TokioCommand::new("ffmpeg")
-        .arg("-i")
+    debug!("Executing ffmpeg MP3 transcoding command");
+    let mut cmd = TokioCommand::new("ffmpeg");
+    cmd.arg("-i")
         .arg(url)
         .arg("-c:a")
         .arg("libmp3lame")
         .arg("-q:a")
         .arg("2") // High quality (0-9, lower is better)
         .arg("-y") // Overwrite output
-        .arg(output_path)
-        .status()
-        .await?;
+        .arg(output_path);
+    
+    // Log command (without full URL for privacy/security)
+    debug!("ffmpeg command: -i [url] -c:a libmp3lame -q:a 2 -y {}", 
+          output_path.display());
+    
+    // Execute command
+    let status = cmd.status().await?;
     
     if !status.success() {
+        error!("ffmpeg MP3 transcoding failed with exit code: {}", status);
         return Err(format!("ffmpeg failed with exit code: {}", status).into());
     }
     
+    debug!("ffmpeg MP3 transcoding completed successfully");
     Ok(())
 }
 
 /// Transcode a URL to OGG/Opus using ffmpeg
 async fn transcode_to_ogg(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let status = TokioCommand::new("ffmpeg")
-        .arg("-i")
+    debug!("Executing ffmpeg OGG/Opus transcoding command");
+    let mut cmd = TokioCommand::new("ffmpeg");
+    cmd.arg("-i")
         .arg(url)
         .arg("-c:a")
         .arg("libopus")
         .arg("-b:a")
         .arg("128k") // Good quality for opus
         .arg("-y") // Overwrite output
-        .arg(output_path)
-        .status()
-        .await?;
+        .arg(output_path);
+    
+    // Log command (without full URL for privacy/security)
+    debug!("ffmpeg command: -i [url] -c:a libopus -b:a 128k -y {}", 
+          output_path.display());
+    
+    // Execute command
+    let status = cmd.status().await?;
     
     if !status.success() {
+        error!("ffmpeg OGG transcoding failed with exit code: {}", status);
         return Err(format!("ffmpeg failed with exit code: {}", status).into());
     }
     
+    debug!("ffmpeg OGG transcoding completed successfully");
     Ok(())
 }
 
@@ -147,7 +219,12 @@ async fn transcode_to_ogg(url: &str, output_path: &Path) -> Result<(), Box<dyn s
 pub async fn cleanup_temp_dir(dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
     if dir.exists() && dir.is_dir() {
         debug!("Cleaning up temporary directory: {}", dir.display());
-        fs::remove_dir_all(dir)?;
+        match fs::remove_dir_all(dir) {
+            Ok(_) => debug!("Successfully removed temp directory: {}", dir.display()),
+            Err(e) => warn!("Failed to remove temp directory {}: {}", dir.display(), e),
+        }
+    } else {
+        debug!("Temp directory doesn't exist or is not a directory: {}", dir.display());
     }
     Ok(())
 }
@@ -157,7 +234,12 @@ pub async fn delete_temp_file(path: &str) -> Result<(), Box<dyn std::error::Erro
     let p = Path::new(path);
     if p.exists() && p.is_file() {
         debug!("Deleting temporary file: {}", p.display());
-        fs::remove_file(p)?;
+        match fs::remove_file(p) {
+            Ok(_) => debug!("Successfully deleted temp file: {}", p.display()),
+            Err(e) => warn!("Failed to delete temp file {}: {}", p.display(), e),
+        }
+    } else {
+        debug!("File doesn't exist or is not a regular file: {}", p.display());
     }
     Ok(())
 }

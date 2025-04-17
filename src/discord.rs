@@ -1,9 +1,10 @@
 use reqwest::{Client, multipart};
 use serde_json::{json, Value};
+use std::fs;
 use std::path::Path;
 use tokio::fs::File;
 use tokio::io::AsyncReadExt;
-use log::{info, warn, error};
+use log::{info, warn, error, debug};
 use crate::soundcloud::Track;
 
 /// Send a track to Discord via webhook
@@ -16,23 +17,44 @@ pub async fn send_track_webhook(
     let client = Client::new();
     
     // Build the embed object
+    info!("Preparing Discord webhook for track '{}' (ID: {})", track.title, track.id);
     let embed = build_track_embed(track);
+    
+    // Check audio files
+    let files_count = match &audio_files {
+        Some(files) => files.len(),
+        None => 0,
+    };
     
     // If we have audio files, we need to use multipart/form-data
     // Otherwise, we can just use a simple JSON post
-    if let Some(files) = audio_files {
+    let result = if let Some(files) = audio_files {
         if files.is_empty() {
+            debug!("No audio files attached, sending embed only");
             send_embed_only(client, webhook_url, embed).await
         } else {
+            debug!("Attaching {} audio files to webhook", files.len());
             send_with_audio_files(client, webhook_url, embed, files).await
         }
     } else {
+        debug!("No audio files provided, sending embed only");
         send_embed_only(client, webhook_url, embed).await
+    };
+    
+    // Log result
+    match &result {
+        Ok(_) => info!("Successfully sent Discord webhook for track '{}' with {} audio files", 
+                      track.title, files_count),
+        Err(e) => error!("Failed to send Discord webhook for track '{}': {}", track.title, e),
     }
+    
+    result
 }
 
 /// Build a Discord embed for the track
 fn build_track_embed(track: &Track) -> Value {
+    debug!("Building Discord embed for track '{}' (ID: {})", track.title, track.id);
+    
     // Format the track duration
     let duration_secs = track.duration / 1000; // Convert from milliseconds
     let duration_str = format!(
@@ -72,7 +94,19 @@ fn build_track_embed(track: &Track) -> Value {
         
         // Check if downloadable
         downloadable = raw_data.get("downloadable").and_then(|v| v.as_bool()).unwrap_or(false);
+    } else {
+        // Use values from the track struct directly if available
+        play_count = track.playback_count;
+        likes_count = track.likes_count;
+        reposts_count = track.reposts_count;
+        comment_count = track.comment_count;
+        genre = track.genre.clone();
+        tags = track.tag_list.clone();
+        downloadable = track.downloadable.unwrap_or(false);
     }
+    
+    debug!("Track metadata - plays: {:?}, likes: {:?}, reposts: {:?}, comments: {:?}", 
+           play_count, likes_count, reposts_count, comment_count);
     
     // Build fields for the embed
     let mut fields = vec![
@@ -148,6 +182,8 @@ fn build_track_embed(track: &Track) -> Value {
         "inline": true
     }));
     
+    debug!("Created {} embed fields for Discord message", fields.len());
+    
     // Create the embed object
     json!({
         "title": track.title,
@@ -178,12 +214,15 @@ async fn send_embed_only(
     webhook_url: &str, 
     embed: Value
 ) -> Result<(), Box<dyn std::error::Error>> {
+    debug!("Preparing embed-only Discord webhook request");
+    
     let payload = json!({
         "embeds": [embed],
         "username": "SoundCloud Archiver",
         "avatar_url": "https://developers.soundcloud.com/assets/logo_big_orange.png"
     });
     
+    debug!("Sending webhook POST request to Discord");
     let response = client
         .post(webhook_url)
         .json(&payload)
@@ -191,12 +230,15 @@ async fn send_embed_only(
         .await?;
     
     let status = response.status();
+    debug!("Discord API response status: {}", status);
+    
     if !status.is_success() {
         let error_text = response.text().await?;
+        error!("Discord webhook error: {} - {}", status, error_text);
         return Err(format!("Discord webhook error: {} - {}", status, error_text).into());
     }
     
-    info!("Successfully sent Discord webhook for track");
+    debug!("Discord webhook sent successfully");
     Ok(())
 }
 
@@ -207,6 +249,8 @@ async fn send_with_audio_files(
     embed: Value,
     files: Vec<(String, String)> // Vec of (file_path, file_name)
 ) -> Result<(), Box<dyn std::error::Error>> {
+    debug!("Preparing multipart request with {} audio files", files.len());
+    
     // Create a multipart form
     let mut form = multipart::Form::new()
         .text("payload_json", json!({
@@ -218,26 +262,72 @@ async fn send_with_audio_files(
     // Add each audio file
     for (i, (file_path, file_name)) in files.iter().enumerate() {
         // Read the file
+        debug!("Adding file {}/{} to multipart form: {}", i+1, files.len(), file_name);
+        
         let path = Path::new(file_path);
-        let mut file = File::open(path).await?;
+        let file_size = match fs::metadata(path) {
+            Ok(metadata) => metadata.len(),
+            Err(e) => {
+                warn!("Failed to get file size for {}: {}", file_path, e);
+                0
+            }
+        };
+        
+        let mut file = match File::open(path).await {
+            Ok(f) => {
+                debug!("Opened file: {} ({} bytes)", file_path, file_size);
+                f
+            },
+            Err(e) => {
+                error!("Failed to open file {}: {}", file_path, e);
+                return Err(format!("Failed to open file {}: {}", file_path, e).into());
+            }
+        };
+        
         let mut buffer = Vec::new();
-        file.read_to_end(&mut buffer).await?;
+        match file.read_to_end(&mut buffer).await {
+            Ok(size) => debug!("Read {} bytes from file {}", size, file_path),
+            Err(e) => {
+                error!("Failed to read file {}: {}", file_path, e);
+                return Err(format!("Failed to read file {}: {}", file_path, e).into());
+            }
+        }
+        
+        // Determine MIME type
+        let mime_type = match path.extension() {
+            Some(ext) if ext == "mp3" => "audio/mpeg",
+            Some(ext) if ext == "ogg" => "audio/ogg",
+            Some(ext) if ext == "opus" => "audio/opus",
+            Some(ext) if ext == "m4a" => "audio/mp4",
+            Some(ext) => {
+                let ext_str = ext.to_string_lossy();
+                debug!("Unknown extension '{}', using default MIME type", ext_str);
+                "application/octet-stream"
+            }
+            None => {
+                debug!("No file extension, using default MIME type");
+                "application/octet-stream"
+            }
+        };
         
         // Add to form
-        form = form.part(format!("file{}", i), 
-            multipart::Part::bytes(buffer)
-                .file_name(file_name.clone())
-                .mime_str(match path.extension() {
-                    Some(ext) if ext == "mp3" => "audio/mpeg",
-                    Some(ext) if ext == "ogg" => "audio/ogg",
-                    Some(ext) if ext == "opus" => "audio/opus",
-                    Some(ext) if ext == "m4a" => "audio/mp4",
-                    _ => "application/octet-stream"
-                })?
-        );
+        debug!("Adding part to form: file{} as {} (MIME: {})", i, file_name, mime_type);
+        match multipart::Part::bytes(buffer)
+            .file_name(file_name.clone())
+            .mime_str(mime_type)
+        {
+            Ok(part) => {
+                form = form.part(format!("file{}", i), part);
+            },
+            Err(e) => {
+                error!("Failed to create multipart part: {}", e);
+                return Err(e.into());
+            }
+        }
     }
     
     // Send the form
+    debug!("Sending multipart POST request to Discord webhook");
     let response = client
         .post(webhook_url)
         .multipart(form)
@@ -245,11 +335,14 @@ async fn send_with_audio_files(
         .await?;
     
     let status = response.status();
+    debug!("Discord API response status: {}", status);
+    
     if !status.is_success() {
         let error_text = response.text().await?;
+        error!("Discord webhook error: {} - {}", status, error_text);
         return Err(format!("Discord webhook error: {} - {}", status, error_text).into());
     }
     
-    info!("Successfully sent Discord webhook with {} audio files", files.len());
+    debug!("Discord webhook with files sent successfully");
     Ok(())
 } 

@@ -14,8 +14,9 @@ pub struct Config {
     // Path to the JSON file containing watchlisted user IDs
     #[serde(default = "default_users_file")]
     pub users_file: String,
-    // Optional path to store database state (ephemeral if not specified)
-    pub db_file: Option<String>,
+    // Path to the JSON file storing known track IDs
+    #[serde(default = "default_tracks_file")]
+    pub tracks_file: String,
     // Maximum tracks to fetch per user (prevents excessive API calls)
     #[serde(default = "default_max_tracks_per_user")]
     pub max_tracks_per_user: usize,
@@ -31,6 +32,10 @@ fn default_users_file() -> String {
     "users.json".to_string()
 }
 
+fn default_tracks_file() -> String {
+    "tracks.json".to_string()
+}
+
 fn default_max_tracks_per_user() -> usize {
     200
 }
@@ -41,7 +46,7 @@ impl Default for Config {
             discord_webhook_url: "".to_string(),
             poll_interval_sec: default_poll_interval(),
             users_file: default_users_file(),
-            db_file: None,
+            tracks_file: default_tracks_file(),
             max_tracks_per_user: default_max_tracks_per_user(),
             temp_dir: None,
         }

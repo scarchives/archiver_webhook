@@ -2,7 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use std::env;
-use log::{info, warn, error, debug};
+use log::{info, warn, error, debug, trace};
 use tokio::sync::Mutex;
 
 mod audio;
@@ -18,29 +18,79 @@ use soundcloud::Track;
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Initialize logger
-    env_logger::init();
-    info!("[scarchivebot] Starting up...");
+    setup_logger();
+    info!("[scarchivebot] Starting up v{}", env!("CARGO_PKG_VERSION"));
+    
+    // Log system info
+    log_system_info();
 
-    // Check for command line args for URL resolution
+    // Check for command line args
     let args: Vec<String> = env::args().collect();
-    if args.len() > 1 && args[1] == "--resolve" && args.len() > 2 {
-        return resolve_soundcloud_url(&args[2]).await;
-    } else if args.len() > 1 && (args[1] == "--help" || args[1] == "-h") {
-        println!("Usage:");
-        println!("  scarchivebot                 - Run in watcher mode");
-        println!("  scarchivebot --resolve URL   - Resolve a SoundCloud URL and display info");
-        println!("  scarchivebot --help          - Show this help");
-        return Ok(());
+    debug!("Command line arguments: {:?}", args);
+    
+    if args.len() > 1 {
+        match args[1].as_str() {
+            "--resolve" if args.len() > 2 => {
+                info!("Running in URL resolution mode");
+                return resolve_soundcloud_url(&args[2]).await;
+            },
+            "--init-tracks" => {
+                info!("Running in database initialization mode");
+                return initialize_tracks_database().await;
+            },
+            "--help" | "-h" => {
+                info!("Showing help information");
+                println!("Usage:");
+                println!("  scarchivebot                 - Run in watcher mode");
+                println!("  scarchivebot --resolve URL   - Resolve a SoundCloud URL and display info");
+                println!("  scarchivebot --init-tracks   - Initialize tracks database with existing tracks");
+                println!("  scarchivebot --help          - Show this help");
+                return Ok(());
+            },
+            _ => {
+                warn!("Unknown command: {}", args[1]);
+                println!("Unknown command. Use --help to see available commands.");
+                return Ok(());
+            }
+        }
     }
 
     // Check for ffmpeg
     if !audio::check_ffmpeg() {
         warn!("ffmpeg not found in PATH, audio transcoding will not work!");
         warn!("Please install ffmpeg and make sure it's in your PATH");
+    } else {
+        info!("ffmpeg found in PATH");
     }
 
     // Run in watcher mode (default)
+    info!("Running in watcher mode");
     run_watcher_mode().await
+}
+
+/// Setup logger with appropriate configuration
+fn setup_logger() {
+    // Get log level from environment or use default
+    match env_logger::try_init() {
+        Ok(_) => {
+            // Successfully initialized logger
+            let log_level = env::var("RUST_LOG").unwrap_or_else(|_| "info".to_string());
+            debug!("Logger initialized with level: {}", log_level);
+        },
+        Err(e) => {
+            // Print to stderr since logging isn't working
+            eprintln!("Failed to initialize logger: {}", e);
+        }
+    }
+}
+
+/// Log system information
+fn log_system_info() {
+    debug!("System information:");
+    debug!("  OS: {}", env::consts::OS);
+    debug!("  Working directory: {:?}", env::current_dir().ok());
+    debug!("  Executable: {:?}", env::current_exe().ok());
+    debug!("  Temp directory: {:?}", env::temp_dir());
 }
 
 /// Resolve a SoundCloud URL and display information
@@ -57,10 +107,22 @@ async fn resolve_soundcloud_url(url: &str) -> Result<(), Box<dyn std::error::Err
     }
     
     // Resolve the URL
-    let resolved = soundcloud::resolve_url(url).await?;
+    info!("Fetching metadata from SoundCloud API");
+    let resolved = match soundcloud::resolve_url(url).await {
+        Ok(data) => {
+            debug!("Successfully resolved URL");
+            data
+        },
+        Err(e) => {
+            error!("Failed to resolve URL: {}", e);
+            return Err(e);
+        }
+    };
     
     // Check if this is a track
     if let Some(kind) = resolved.get("kind").and_then(|v| v.as_str()) {
+        info!("Resolved object type: {}", kind);
+        
         if kind == "track" {
             // Get the track ID
             if let Some(id) = resolved.get("id").and_then(|v| v.as_u64()) {
@@ -68,6 +130,7 @@ async fn resolve_soundcloud_url(url: &str) -> Result<(), Box<dyn std::error::Err
                 info!("URL resolved to track ID: {}", track_id);
                 
                 // Get detailed track info
+                debug!("Fetching detailed track information");
                 let track = soundcloud::get_track_details(&track_id).await?;
                 
                 // Print track details
@@ -110,6 +173,7 @@ async fn resolve_soundcloud_url(url: &str) -> Result<(), Box<dyn std::error::Err
                     println!("Downloadable: No");
                 }
                 
+                info!("Successfully displayed track information");
                 return Ok(());
             }
         } else if kind == "user" {
@@ -136,24 +200,30 @@ async fn resolve_soundcloud_url(url: &str) -> Result<(), Box<dyn std::error::Err
                 println!("\nTo add this user to your watchlist, add the following ID to your users.json file:");
                 println!("  {}", user_id);
                 
+                info!("Successfully displayed user information");
                 return Ok(());
             }
         }
     }
     
     // If we get here, something went wrong with the URL
+    warn!("URL resolved, but could not determine if it's a track or user");
     println!("URL resolved, but could not determine if it's a track or user.");
     println!("Raw data: {}", serde_json::to_string_pretty(&resolved)?);
     
     Ok(())
 }
 
-/// Run the bot in watcher mode (continuous monitoring)
-async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error>> {
+/// Initialize tracks database with all existing tracks from all users
+async fn initialize_tracks_database() -> Result<(), Box<dyn std::error::Error>> {
     // Load config
     let config_path = "config.json";
+    info!("Loading configuration from {}", config_path);
     let config = match Config::load(config_path) {
-        Ok(c) => c,
+        Ok(c) => {
+            debug!("Configuration loaded successfully");
+            c
+        },
         Err(e) => {
             error!("Failed to load config: {}", e);
             return Err(e);
@@ -161,8 +231,12 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error>> {
     };
     
     // Load users
+    info!("Loading users from {}", config.users_file);
     let users = match Users::load(&config.users_file) {
-        Ok(u) => u,
+        Ok(u) => {
+            info!("Loaded {} users", u.users.len());
+            u
+        },
         Err(e) => {
             error!("Failed to load users from {}: {}", config.users_file, e);
             return Err(e);
@@ -171,19 +245,24 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error>> {
     
     if users.users.is_empty() {
         warn!("No users found in {}. Add some users to the file and restart!", config.users_file);
+        return Err("No users found".into());
     }
     
     // Initialize database
-    let db_path = config.db_file.clone();
-    let db = Arc::new(Mutex::new(match TrackDatabase::load_or_create(db_path) {
-        Ok(d) => d,
+    let tracks_db_path = config.tracks_file.clone();
+    let mut db = match TrackDatabase::load_or_create(tracks_db_path) {
+        Ok(d) => {
+            info!("Tracks database initialized from {}", d.db_path);
+            d
+        },
         Err(e) => {
-            error!("Failed to initialize database: {}", e);
+            error!("Failed to initialize tracks database: {}", e);
             return Err(e);
         }
-    }));
+    };
     
     // Initialize SoundCloud client
+    info!("Initializing SoundCloud client");
     match soundcloud::initialize().await {
         Ok(_) => info!("SoundCloud client initialized successfully"),
         Err(e) => {
@@ -192,15 +271,112 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     
-    // Initialize users in database (if needed)
-    {
-        let mut db_guard = db.lock().await;
-        for user_id in &users.users {
-            db_guard.ensure_user(user_id);
+    // Track stats
+    let mut total_users_processed = 0;
+    let mut total_tracks_added = 0;
+    
+    // Process each user
+    for user_id in &users.users {
+        info!("Fetching tracks for user {}", user_id);
+        match soundcloud::get_user_tracks(user_id, config.max_tracks_per_user).await {
+            Ok(tracks) => {
+                info!("Found {} tracks for user {}", tracks.len(), user_id);
+                
+                // Extract track IDs
+                let track_ids: Vec<String> = tracks.iter().map(|t| t.id.clone()).collect();
+                
+                // Add to database
+                let current_count = db.get_all_tracks().len();
+                db.initialize_with_tracks(&track_ids);
+                let new_count = db.get_all_tracks().len();
+                
+                let added = new_count - current_count;
+                total_tracks_added += added;
+                
+                info!("Added {} new tracks for user {} to database", added, user_id);
+                total_users_processed += 1;
+            },
+            Err(e) => {
+                error!("Failed to fetch tracks for user {}: {}", user_id, e);
+            }
         }
-        // Save after initialization
-        if let Err(e) = db_guard.save() {
-            warn!("Failed to save database after initialization: {}", e);
+    }
+    
+    // Save database
+    if let Err(e) = db.save() {
+        error!("Failed to save tracks database: {}", e);
+        return Err(e);
+    }
+    
+    println!("\nInitialization complete!");
+    println!("Processed {} users", total_users_processed);
+    println!("Added {} tracks to database", total_tracks_added);
+    println!("Total tracks in database: {}", db.get_all_tracks().len());
+    
+    Ok(())
+}
+
+/// Run the bot in watcher mode (continuous monitoring)
+async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error>> {
+    // Load config
+    let config_path = "config.json";
+    info!("Loading configuration from {}", config_path);
+    let config = match Config::load(config_path) {
+        Ok(c) => {
+            debug!("Configuration loaded successfully");
+            debug!("Poll interval: {} seconds", c.poll_interval_sec);
+            debug!("Users file: {}", c.users_file);
+            debug!("Tracks file: {}", c.tracks_file);
+            debug!("Max tracks per user: {}", c.max_tracks_per_user);
+            c
+        },
+        Err(e) => {
+            error!("Failed to load config: {}", e);
+            return Err(e);
+        }
+    };
+    
+    // Load users
+    info!("Loading users from {}", config.users_file);
+    let users = match Users::load(&config.users_file) {
+        Ok(u) => {
+            info!("Loaded {} users", u.users.len());
+            u
+        },
+        Err(e) => {
+            error!("Failed to load users from {}: {}", config.users_file, e);
+            return Err(e);
+        }
+    };
+    
+    if users.users.is_empty() {
+        warn!("No users found in {}. Add some users to the file and restart!", config.users_file);
+    } else {
+        debug!("Loaded users: {:?}", users.users);
+    }
+    
+    // Initialize database
+    info!("Initializing tracks database");
+    let tracks_db_path = config.tracks_file.clone();
+    let db = Arc::new(Mutex::new(match TrackDatabase::load_or_create(tracks_db_path) {
+        Ok(d) => {
+            info!("Tracks database initialized from {} with {} tracks", 
+                 d.db_path, d.get_all_tracks().len());
+            d
+        },
+        Err(e) => {
+            error!("Failed to initialize tracks database: {}", e);
+            return Err(e);
+        }
+    }));
+    
+    // Initialize SoundCloud client
+    info!("Initializing SoundCloud client");
+    match soundcloud::initialize().await {
+        Ok(_) => info!("SoundCloud client initialized successfully"),
+        Err(e) => {
+            error!("Failed to initialize SoundCloud client: {}", e);
+            return Err(e);
         }
     }
     
@@ -211,15 +387,33 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error>> {
     // Start main polling loop
     info!("Starting polling loop with interval of {} seconds", config.poll_interval_sec);
     
+    // Track stats
+    let mut total_polls = 0;
+    let mut total_tracks_found = 0;
+    let mut last_stats_time = std::time::Instant::now();
+    
     loop {
         // Wait for next tick
         interval.tick().await;
-        info!("Polling for new tracks...");
+        total_polls += 1;
+        
+        // Log periodic stats (every hour)
+        let now = std::time::Instant::now();
+        if now.duration_since(last_stats_time).as_secs() > 3600 {
+            info!("Stats: {} polls completed, {} new tracks found", 
+                 total_polls, total_tracks_found);
+            last_stats_time = now;
+        }
+        
+        debug!("Poll #{}: Checking for new tracks", total_polls);
         
         // For each user, check for new tracks
         for user_id in &users.users {
+            trace!("Polling user {}", user_id);
             match poll_user(&config, user_id, &db).await {
                 Ok(new_count) => {
+                    total_tracks_found += new_count;
+                    
                     if new_count > 0 {
                         info!("Found {} new tracks for user {}", new_count, user_id);
                     } else {
@@ -231,6 +425,16 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
+        
+        // Save the database after each poll
+        {
+            let mut db_guard = db.lock().await;
+            if let Err(e) = db_guard.save() {
+                warn!("Failed to save tracks database: {}", e);
+            }
+        }
+        
+        debug!("Poll #{} completed", total_polls);
     }
 }
 
@@ -240,14 +444,6 @@ async fn poll_user(
     user_id: &str,
     db: &Arc<Mutex<TrackDatabase>>,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    // Get existing track IDs for this user
-    let known_tracks = {
-        let db_guard = db.lock().await;
-        db_guard.get_tracks(user_id)
-    };
-    
-    debug!("User {} has {} known tracks", user_id, known_tracks.len());
-    
     // Fetch latest tracks from SoundCloud
     let tracks = match soundcloud::get_user_tracks(user_id, config.max_tracks_per_user).await {
         Ok(t) => t,
@@ -265,16 +461,7 @@ async fn poll_user(
     // Update database
     let new_track_ids = {
         let mut db_guard = db.lock().await;
-        let new_ids = db_guard.add_tracks(user_id, &track_ids);
-        
-        // Save after update
-        if !new_ids.is_empty() {
-            if let Err(e) = db_guard.save() {
-                warn!("Failed to save database after adding tracks: {}", e);
-            }
-        }
-        
-        new_ids
+        db_guard.add_tracks(&track_ids)
     };
     
     if new_track_ids.is_empty() {

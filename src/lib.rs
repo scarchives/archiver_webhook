@@ -28,21 +28,11 @@ pub async fn initialize(config_path: &str) -> Result<(Config, Users, db::TrackDa
     }
     
     // Initialize database
-    let db_path = config.db_file.clone();
-    let mut db = db::TrackDatabase::load_or_create(db_path)?;
+    let tracks_db_path = config.tracks_file.clone();
+    let db = db::TrackDatabase::load_or_create(tracks_db_path)?;
     
     // Initialize SoundCloud client
     soundcloud::initialize().await?;
-    
-    // Initialize users in database (if needed)
-    for user_id in &users.users {
-        db.ensure_user(user_id);
-    }
-    
-    // Save after initialization
-    if let Err(e) = db.save() {
-        log::warn!("Failed to save database after initialization: {}", e);
-    }
     
     Ok((config, users, db))
 } 

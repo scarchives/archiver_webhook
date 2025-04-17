@@ -53,6 +53,7 @@ pub struct TrackUser {
 /// Initialize the SoundCloud client
 pub async fn initialize() -> Result<(), Box<dyn std::error::Error>> {
     // Generate the initial client ID
+    info!("Initializing SoundCloud client...");
     let initial_id = generate_client_id().await?;
     
     // Store it in the global cache
@@ -93,6 +94,7 @@ pub async fn refresh_client_id() -> Result<String, Box<dyn std::error::Error>> {
 async fn generate_client_id() -> Result<String, Box<dyn std::error::Error>> {
     let client = Client::new();
     
+    debug!("Fetching SoundCloud homepage to extract client ID...");
     // Fetch the SoundCloud homepage
     let html = client
         .get("https://soundcloud.com")
@@ -107,20 +109,30 @@ async fn generate_client_id() -> Result<String, Box<dyn std::error::Error>> {
     let matches: Vec<_> = script_regex.captures_iter(&html).collect();
     
     if matches.is_empty() {
+        error!("No script URLs found on SoundCloud homepage - site structure may have changed");
         return Err("No script URLs found on SoundCloud homepage".into());
     }
+    
+    debug!("Found {} potential script URLs to check for client ID", matches.len());
     
     // Check each script for the client ID
     let client_id_regex = Regex::new(r#"client_id:"([^"]+)"#)?;
     
-    for cap in matches {
+    for (idx, cap) in matches.iter().enumerate() {
         if let Some(script_url) = cap.get(1) {
+            debug!("Checking script {}/{}: {}", idx + 1, matches.len(), script_url.as_str());
             let script_content = match client
                 .get(script_url.as_str())
                 .send()
                 .await
             {
-                Ok(res) => res.text().await?,
+                Ok(res) => {
+                    if !res.status().is_success() {
+                        warn!("Script fetch returned status {}: {}", res.status(), script_url.as_str());
+                        continue;
+                    }
+                    res.text().await?
+                },
                 Err(e) => {
                     warn!("Failed to fetch script {}: {}", script_url.as_str(), e);
                     continue;
@@ -129,12 +141,15 @@ async fn generate_client_id() -> Result<String, Box<dyn std::error::Error>> {
             
             if let Some(client_id_match) = client_id_regex.captures(&script_content) {
                 if let Some(client_id) = client_id_match.get(1) {
-                    return Ok(client_id.as_str().to_string());
+                    let id = client_id.as_str().to_string();
+                    debug!("Successfully extracted client ID from script {}: {}", idx + 1, id);
+                    return Ok(id);
                 }
             }
         }
     }
     
+    error!("Could not find client_id in any SoundCloud scripts - site structure may have changed");
     Err("Could not find client_id in any script".into())
 }
 
@@ -148,10 +163,18 @@ pub async fn get_user_tracks(
     let mut offset = 0;
     let chunk_size = 50; // API limit per request
     
+    info!("Fetching up to {} tracks for user {}", limit, user_id);
+    
     // Get the current client ID or refresh it
     let mut client_id = match get_client_id() {
-        Some(id) => id,
-        None => refresh_client_id().await?,
+        Some(id) => {
+            debug!("Using cached client ID: {}", id);
+            id
+        },
+        None => {
+            debug!("No cached client ID, generating new one");
+            refresh_client_id().await?
+        },
     };
     
     while tracks.len() < limit {
@@ -160,6 +183,8 @@ pub async fn get_user_tracks(
             "https://api-v2.soundcloud.com/users/{}/tracks?client_id={}&offset={}&limit={}",
             user_id, client_id, offset, current_limit
         );
+        
+        debug!("Fetching tracks batch: offset={}, limit={}", offset, current_limit);
         
         // Make the request with retry logic
         let mut response_json = None;
@@ -182,13 +207,13 @@ pub async fn get_user_tracks(
                             continue;
                         }
                         
-                        warn!("API error: HTTP {}", res.status());
+                        warn!("API error: HTTP {} when fetching tracks for user {}", res.status(), user_id);
                         continue;
                     }
                     res
                 }
                 Err(e) => {
-                    warn!("Request error: {}", e);
+                    warn!("Network error when fetching tracks for user {}: {}", user_id, e);
                     continue;
                 }
             };
@@ -199,7 +224,7 @@ pub async fn get_user_tracks(
                     break;
                 }
                 Err(e) => {
-                    warn!("JSON parse error: {}", e);
+                    warn!("JSON parse error for tracks response: {}", e);
                     if retry == max_retries - 1 {
                         return Err(format!("Failed to parse JSON after {} retries", max_retries).into());
                     }
@@ -209,30 +234,44 @@ pub async fn get_user_tracks(
         
         let json = match response_json {
             Some(j) => j,
-            None => return Err(format!("Failed to fetch tracks for user {} after {} retries", 
-                                      user_id, max_retries).into()),
+            None => {
+                error!("Failed to fetch tracks for user {} after {} retries", user_id, max_retries);
+                return Err(format!("Failed to fetch tracks for user {} after {} retries", 
+                                  user_id, max_retries).into());
+            }
         };
         
         // Extract the collection of tracks
         let collection = match json.get("collection") {
             Some(Value::Array(arr)) => arr,
-            _ => return Err(format!("Unexpected API response format for user {}", user_id).into()),
+            _ => {
+                error!("Unexpected API response format for user {}: missing 'collection' array", user_id);
+                return Err(format!("Unexpected API response format for user {}", user_id).into());
+            }
         };
         
         if collection.is_empty() {
+            debug!("No more tracks found for user {} at offset {}", user_id, offset);
             break; // No more tracks
         }
         
+        debug!("Processing {} tracks from response", collection.len());
+        
         // Parse the tracks
+        let mut batch_count = 0;
         for track_json in collection {
             // Extract basic fields
             if let Some(id) = track_json.get("id").and_then(Value::as_u64) {
+                let title = track_json.get("title")
+                    .and_then(Value::as_str)
+                    .unwrap_or("Untitled")
+                    .to_string();
+                
+                debug!("Processing track: {} (ID: {})", title, id);
+                
                 let track = Track {
                     id: id.to_string(),
-                    title: track_json.get("title")
-                        .and_then(Value::as_str)
-                        .unwrap_or("Untitled")
-                        .to_string(),
+                    title,
                     permalink_url: track_json.get("permalink_url")
                         .and_then(Value::as_str)
                         .unwrap_or("")
@@ -270,18 +309,25 @@ pub async fn get_user_tracks(
                     raw_data: Some(track_json.clone()),
                 };
                 tracks.push(track);
+                batch_count += 1;
+            } else {
+                warn!("Track missing ID in API response - skipping");
             }
         }
+        
+        debug!("Added {} tracks from batch, total: {}", batch_count, tracks.len());
         
         offset += collection.len();
         
         // If we got fewer tracks than requested, there are no more
         if collection.len() < current_limit {
+            debug!("Received fewer tracks than requested ({} < {}), no more available", 
+                  collection.len(), current_limit);
             break;
         }
     }
     
-    info!("Fetched {} tracks for user {}", tracks.len(), user_id);
+    info!("Successfully fetched {} tracks for user {}", tracks.len(), user_id);
     Ok(tracks)
 }
 
