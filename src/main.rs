@@ -38,12 +38,18 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 info!("Running in database initialization mode");
                 return initialize_tracks_database().await;
             },
+            "--post-track" if args.len() > 2 => {
+                info!("Running in post-track mode");
+                return post_single_track(&args[2]).await;
+            },
             "--help" | "-h" => {
                 info!("Showing help information");
                 println!("Usage:");
                 println!("  scarchivebot                 - Run in watcher mode");
                 println!("  scarchivebot --resolve URL   - Resolve a SoundCloud URL and display info");
                 println!("  scarchivebot --init-tracks   - Initialize tracks database with existing tracks");
+                println!("  scarchivebot --post-track ID - Post a specific track to webhook (bypass database)");
+                println!("                               - Can be a track ID or a SoundCloud URL");
                 println!("  scarchivebot --help          - Show this help");
                 return Ok(());
             },
@@ -495,21 +501,27 @@ async fn poll_user(
                 let mut files = Vec::new();
                 
                 if let Some(path) = mp3 {
-                    let filename = Path::new(&path)
+                    let file_path = path.clone();
+                    let filename = Path::new(&file_path)
                         .file_name()
                         .unwrap_or_else(|| std::ffi::OsStr::new("track.mp3"))
                         .to_string_lossy()
                         .to_string();
-                    files.push((path, filename));
+                    
+                    info!("Generated MP3 file: {}", filename);
+                    files.push((file_path, filename));
                 }
                 
                 if let Some(path) = ogg {
-                    let filename = Path::new(&path)
+                    let file_path = path.clone();
+                    let filename = Path::new(&file_path)
                         .file_name()
                         .unwrap_or_else(|| std::ffi::OsStr::new("track.ogg"))
                         .to_string_lossy()
                         .to_string();
-                    files.push((path, filename));
+                    
+                    info!("Generated OGG file: {}", filename);
+                    files.push((file_path, filename));
                 }
                 
                 files
@@ -541,4 +553,141 @@ async fn poll_user(
     }
     
     Ok(new_tracks_processed)
+}
+
+/// Post a single track to the webhook without checking the database
+async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error::Error>> {
+    // Load config
+    let config_path = "config.json";
+    info!("Loading configuration from {}", config_path);
+    let config = match Config::load(config_path) {
+        Ok(c) => {
+            debug!("Configuration loaded successfully");
+            c
+        },
+        Err(e) => {
+            error!("Failed to load config: {}", e);
+            return Err(e);
+        }
+    };
+    
+    // Initialize SoundCloud client
+    info!("Initializing SoundCloud client");
+    match soundcloud::initialize().await {
+        Ok(_) => info!("SoundCloud client initialized successfully"),
+        Err(e) => {
+            error!("Failed to initialize SoundCloud client: {}", e);
+            return Err(e);
+        }
+    }
+    
+    // Check if this is a URL or an ID
+    let track_id = if id_or_url.starts_with("http") {
+        // This is a URL, resolve it
+        info!("Resolving SoundCloud URL: {}", id_or_url);
+        let resolved = match soundcloud::resolve_url(id_or_url).await {
+            Ok(data) => data,
+            Err(e) => {
+                error!("Failed to resolve URL: {}", e);
+                return Err(e);
+            }
+        };
+        
+        // Check if it's a track
+        if let Some(kind) = resolved.get("kind").and_then(|v| v.as_str()) {
+            if kind == "track" {
+                if let Some(id) = resolved.get("id").and_then(|v| v.as_u64()) {
+                    let track_id = id.to_string();
+                    info!("URL resolved to track ID: {}", track_id);
+                    track_id
+                } else {
+                    error!("Could not extract track ID from resolved URL");
+                    return Err("Could not extract track ID from resolved URL".into());
+                }
+            } else {
+                error!("URL does not point to a track, but to a {}", kind);
+                return Err(format!("URL points to a {}, not a track", kind).into());
+            }
+        } else {
+            error!("Could not determine object type from resolved URL");
+            return Err("Could not determine object type from resolved URL".into());
+        }
+    } else {
+        // Assume this is a track ID
+        id_or_url.to_string()
+    };
+    
+    // Get track details
+    info!("Fetching track details for ID: {}", track_id);
+    let track_details = match soundcloud::get_track_details(&track_id).await {
+        Ok(t) => {
+            info!("Successfully fetched track: {} by {}", t.title, t.user.username);
+            t
+        },
+        Err(e) => {
+            error!("Failed to get track details: {}", e);
+            return Err(e);
+        }
+    };
+    
+    // Download and transcode audio
+    info!("Processing audio for track");
+    let audio_files = match audio::process_track_audio(&track_details, config.temp_dir.as_deref()).await {
+        Ok((mp3, ogg)) => {
+            let mut files = Vec::new();
+            
+            if let Some(path) = mp3 {
+                let file_path = path.clone();
+                let filename = Path::new(&file_path)
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("track.mp3"))
+                    .to_string_lossy()
+                    .to_string();
+                
+                info!("Generated MP3 file: {}", filename);
+                files.push((file_path, filename));
+            }
+            
+            if let Some(path) = ogg {
+                let file_path = path.clone();
+                let filename = Path::new(&file_path)
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("track.ogg"))
+                    .to_string_lossy()
+                    .to_string();
+                
+                info!("Generated OGG file: {}", filename);
+                files.push((file_path, filename));
+            }
+            
+            files
+        },
+        Err(e) => {
+            error!("Failed to process audio: {}", e);
+            Vec::new() // Continue without audio files
+        }
+    };
+    
+    // Send to Discord
+    info!("Sending webhook for track: {} by {}", track_details.title, track_details.user.username);
+    match discord::send_track_webhook(&config.discord_webhook_url, &track_details, Some(audio_files.clone())).await {
+        Ok(_) => {
+            info!("Successfully sent webhook for track");
+            println!("Track successfully posted to Discord: {} by {}", 
+                   track_details.title, track_details.user.username);
+        },
+        Err(e) => {
+            error!("Failed to send webhook: {}", e);
+            return Err(e);
+        }
+    }
+    
+    // Clean up temp files
+    for (path, _) in audio_files {
+        if let Err(e) = audio::delete_temp_file(&path).await {
+            warn!("Failed to clean up temp file {}: {}", path, e);
+        }
+    }
+    
+    Ok(())
 }
