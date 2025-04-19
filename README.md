@@ -1,4 +1,4 @@
-# SoundCloud Archiver Bot
+# SoundCloud Scraper Webhook
 
 A Rust application that watches SoundCloud users for new tracks and sends them to a Discord webhook with rich formatting and audio files.
 
