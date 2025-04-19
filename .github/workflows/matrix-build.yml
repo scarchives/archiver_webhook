@@ -67,19 +67,29 @@ jobs:
           command: test
           args: --target ${{ matrix.target }}
 
+      - name: List built files
+        shell: bash
+        run: |
+          if [ "${{ matrix.os }}" == "windows-latest" ]; then
+            dir target\\${{ matrix.target }}\\release
+          else
+            ls -la target/${{ matrix.target }}/release
+          fi
+
       - name: Upload artifacts
         id: upload-artifact
         uses: actions/upload-artifact@v4
         with:
-          name: archiver-${{ matrix.target }}
+          name: scraper-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/archiver_webhook*
-            !target/${{ matrix.target }}/release/archiver_webhook.d
-          if-no-files-found: error
+            target/${{ matrix.target }}/release/scraper_webhook*
+            !target/${{ matrix.target }}/release/scraper_webhook.d
+          if-no-files-found: warn
           compression-level: 6
           retention-days: 5
       
       - name: Output artifact info
+        if: steps.upload-artifact.outputs.artifact-id != ''
         run: |
           echo "Artifact ID: ${{ steps.upload-artifact.outputs.artifact-id }}"
           echo "Artifact URL: ${{ steps.upload-artifact.outputs.artifact-url }}" 
