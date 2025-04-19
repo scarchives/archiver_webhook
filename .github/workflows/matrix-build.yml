@@ -1,0 +1,85 @@
+name: Matrix Build with Cargo Cache
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    name: Build ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v3
+
+      - name: Setup Rust
+        uses: actions-rs/toolchain@v1
+        with:
+          toolchain: stable
+          target: ${{ matrix.target }}
+          override: true
+          profile: minimal
+
+      - name: Cargo cache
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ matrix.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ matrix.os }}-cargo-
+
+      # Create an empty Cargo.lock file if it doesn't exist
+      - name: Check for Cargo.lock
+        shell: bash
+        run: |
+          if [ ! -f "Cargo.lock" ]; then
+            echo "Creating empty Cargo.lock file"
+            touch Cargo.lock
+          fi
+
+      - name: Build
+        uses: actions-rs/cargo@v1
+        with:
+          command: build
+          args: --release --target ${{ matrix.target }}
+
+      - name: Run tests
+        uses: actions-rs/cargo@v1
+        with:
+          command: test
+          args: --target ${{ matrix.target }}
+
+      - name: Upload artifacts
+        id: upload-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: archiver-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/archiver_webhook*
+            !target/${{ matrix.target }}/release/archiver_webhook.d
+          if-no-files-found: error
+          compression-level: 6
+          retention-days: 5
+      
+      - name: Output artifact info
+        run: |
+          echo "Artifact ID: ${{ steps.upload-artifact.outputs.artifact-id }}"
+          echo "Artifact URL: ${{ steps.upload-artifact.outputs.artifact-url }}" 
