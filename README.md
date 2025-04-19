@@ -83,27 +83,27 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
 Run the application in watcher mode (default):
 
 ```bash
-./scarchivebot
+./scraper_webhook
 ```
 
 To resolve a SoundCloud URL and get information (artist, track, user info):
 
 ```bash
-./scarchivebot --resolve https://soundcloud.com/artist/track-name
+./scraper_webhook --resolve https://soundcloud.com/artist/track-name
 ```
 
 To initialize the tracks database with all existing tracks from watched users:
 
 ```bash
-./scarchivebot --init-tracks
+./scraper_webhook --init-tracks
 ```
 
 To post a specific track to Discord without adding it to the database:
 
 ```bash
-./scarchivebot --post-track 1234567890
+./scraper_webhook --post-track 1234567890
 # Or with a URL
-./scarchivebot --post-track https://soundcloud.com/artist/track-name
+./scraper_webhook --post-track https://soundcloud.com/artist/track-name
 ```
 
 # Logging
@@ -127,15 +127,15 @@ You can use the Docker image from GitHub Container Registry, which is automatica
 
 ```bash
 # Pull the latest image
-docker pull ghcr.io/scarchive/scarchivebot:latest
+docker pull ghcr.io/scarchive/scraper_webhook:latest
 
 # Run with your configuration files
-docker run -d --name scarchivebot \
+docker run -d --name scraper_webhook \
   -v "$(pwd)/config.json:/app/config.json:ro" \
   -v "$(pwd)/users.json:/app/users.json:rw" \
   -v "$(pwd)/tracks.json:/app/tracks.json:rw" \
   -v "$(pwd)/temp:/app/temp:rw" \
-  ghcr.io/scarchive/scarchivebot:latest
+  ghcr.io/scarchive/scraper_webhook:latest
 ```
 
 Available tags:
@@ -150,9 +150,9 @@ Create a `docker-compose.yml` file:
 version: '3'
 
 services:
-  scarchivebot:
-    image: ghcr.io/scarchive/scarchivebot:latest
-    container_name: scarchivebot
+  scraper_webhook:
+    image: ghcr.io/scarchive/scraper_webhook:latest
+    container_name: scraper_webhook
     restart: unless-stopped
     volumes:
       - ./config.json:/app/config.json:ro
@@ -178,13 +178,13 @@ Run one-time commands:
 
 ```bash
 # Resolve a SoundCloud URL
-docker-compose run --rm scarchivebot --resolve https://soundcloud.com/artist/track-name
+docker-compose run --rm scraper_webhook --resolve https://soundcloud.com/artist/track-name
 
 # Initialize tracks database
-docker-compose run --rm scarchivebot --init-tracks
+docker-compose run --rm scraper_webhook --init-tracks
 
 # Post a specific track
-docker-compose run --rm scarchivebot --post-track 1234567890
+docker-compose run --rm scraper_webhook --post-track 1234567890
 ```
 
 #### Building the Image Locally
@@ -192,18 +192,18 @@ docker-compose run --rm scarchivebot --post-track 1234567890
 Build the image:
 
 ```bash
-docker build -t scarchivebot .
+docker build -t scraper_webhook .
 ```
 
 Run in watcher mode:
 
 ```bash
-docker run -d --name scarchivebot \
+docker run -d --name scraper_webhook \
   -v "$(pwd)/config.json:/app/config.json:ro" \
   -v "$(pwd)/users.json:/app/users.json:rw" \
   -v "$(pwd)/tracks.json:/app/tracks.json:rw" \
   -v "$(pwd)/temp:/app/temp:rw" \
-  scarchivebot
+  scraper_webhook
 ```
 
 Run one-time commands:
@@ -214,7 +214,7 @@ docker run --rm \
   -v "$(pwd)/users.json:/app/users.json:rw" \
   -v "$(pwd)/tracks.json:/app/tracks.json:rw" \
   -v "$(pwd)/temp:/app/temp:rw" \
-  scarchivebot --resolve https://soundcloud.com/artist/track-name
+  scraper_webhook --resolve https://soundcloud.com/artist/track-name
 ```
 
 ## How to Find SoundCloud User IDs

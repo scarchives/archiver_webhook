@@ -20,16 +20,16 @@ RUN apt-get update && apt-get install -y ffmpeg ca-certificates && \
 WORKDIR /app
 
 # Copy only the compiled binary from builder
-COPY --from=builder /app/target/release/scarchivebot /app/scarchivebot
+COPY --from=builder /app/target/release/scraper_webhook /app/scraper_webhook
 
 # Set environment variables
 ENV RUST_LOG=info
 
 # Add image labels
-LABEL org.opencontainers.image.title="SoundCloud Archiver Bot" \
+LABEL org.opencontainers.image.title="SoundCloud Scraper Webhook" \
       org.opencontainers.image.description="Watches SoundCloud users for new tracks and sends them to Discord" \
-      org.opencontainers.image.source="https://github.com/scarchive/scarchivebot" \
+      org.opencontainers.image.source="https://github.com/scarchive/scraper_webhook" \
       org.opencontainers.image.licenses="MIT"
 
 # Run the application
-ENTRYPOINT ["/app/scarchivebot"]
+ENTRYPOINT ["/app/scraper_webhook"]

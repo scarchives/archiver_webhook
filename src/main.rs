@@ -20,7 +20,7 @@ use db::TrackDatabase;
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize logger
     setup_logger();
-    info!("[scarchivebot] Starting up v{}", env!("CARGO_PKG_VERSION"));
+    info!("[scraper_webhook] Starting up v{}", env!("CARGO_PKG_VERSION"));
     
     // Log system info
     log_system_info();
@@ -46,12 +46,12 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "--help" | "-h" => {
                 info!("Showing help information");
                 println!("Usage:");
-                println!("  scarchivebot                 - Run in watcher mode");
-                println!("  scarchivebot --resolve URL   - Resolve a SoundCloud URL and display info");
-                println!("  scarchivebot --init-tracks   - Initialize tracks database with existing tracks");
-                println!("  scarchivebot --post-track ID - Post a specific track to webhook (bypass database)");
+                println!("  scraper_webhook                 - Run in watcher mode");
+                println!("  scraper_webhook --resolve URL   - Resolve a SoundCloud URL and display info");
+                println!("  scraper_webhook --init-tracks   - Initialize tracks database with existing tracks");
+                println!("  scraper_webhook --post-track ID - Post a specific track to webhook (bypass database)");
                 println!("                               - Can be a track ID or a SoundCloud URL");
-                println!("  scarchivebot --help          - Show this help");
+                println!("  scraper_webhook --help          - Show this help");
                 return Ok(());
             },
             _ => {

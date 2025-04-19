@@ -50,8 +50,8 @@ jobs:
           context: .
           push: true
           tags: |
-            ghcr.io/scarchive/scarchivebot:latest
-            ghcr.io/scarchive/scarchivebot:${{ steps.commit_info.outputs.sha }}
+            ghcr.io/scarchive/archiver_webhook:latest
+            ghcr.io/scarchive/archiver_webhook:${{ steps.commit_info.outputs.sha }}
           build-args: |
             VERSION=latest
 
