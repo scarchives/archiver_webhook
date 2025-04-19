@@ -111,49 +111,7 @@ fn build_track_embed(track: &Track) -> Value {
            play_count, likes_count, reposts_count, comment_count);
     
     // Build fields for the embed
-    let mut fields = vec![
-        json!({
-            "name": "Duration",
-            "value": duration_str,
-            "inline": true
-        })
-    ];
-    
-    // Add play count if available
-    if let Some(count) = play_count {
-        fields.push(json!({
-            "name": "Plays",
-            "value": format!("{}", count),
-            "inline": true
-        }));
-    }
-    
-    // Add likes count if available
-    if let Some(count) = likes_count {
-        fields.push(json!({
-            "name": "Likes",
-            "value": format!("{}", count),
-            "inline": true
-        }));
-    }
-    
-    // Add reposts count if available
-    if let Some(count) = reposts_count {
-        fields.push(json!({
-            "name": "Reposts",
-            "value": format!("{}", count),
-            "inline": true
-        }));
-    }
-    
-    // Add comments count if available
-    if let Some(count) = comment_count {
-        fields.push(json!({
-            "name": "Comments",
-            "value": format!("{}", count),
-            "inline": true
-        }));
-    }
+    let mut fields = vec![];
     
     // Add genre if available
     if let Some(g) = genre {
@@ -169,11 +127,14 @@ fn build_track_embed(track: &Track) -> Value {
     // Add tags as a separate field if available
     if let Some(tag_list) = tags {
         if !tag_list.is_empty() {
-            fields.push(json!({
-                "name": "Tags",
-                "value": tag_list.replace(" ", ", "),
-                "inline": false
-            }));
+            let parsed_tags = parse_tags(&tag_list);
+            if !parsed_tags.is_empty() {
+                fields.push(json!({
+                    "name": "Tags",
+                    "value": parsed_tags.join(", "),
+                    "inline": false
+                }));
+            }
         }
     }
     
@@ -199,10 +160,6 @@ fn build_track_embed(track: &Track) -> Value {
         "url": track.permalink_url,
         "timestamp": track.created_at,
         "color": 0xFF7700, // SoundCloud orange
-        "footer": {
-            "text": "Archived via SoundCloud Archiver",
-            "icon_url": "https://developers.soundcloud.com/assets/logo_big_white-65c2b096da68dd533db18b9f07d14054.png"
-        },
         "author": {
             "name": track.user.username.clone(),
             "url": track.user.permalink_url.clone(),
@@ -213,6 +170,62 @@ fn build_track_embed(track: &Track) -> Value {
         },
         "fields": fields
     })
+}
+
+/// Parse a tag list string, respecting quoted tags
+/// 
+/// Handles:
+/// - Space-separated individual tags
+/// - Tags enclosed in double quotes (treated as a single tag)
+/// - Supports nested quotes
+fn parse_tags(tag_list: &str) -> Vec<String> {
+    let mut tags = Vec::new();
+    let mut current_tag = String::new();
+    let mut in_quotes = false;
+    let mut escape_next = false;
+    
+    for c in tag_list.chars() {
+        match (c, in_quotes, escape_next) {
+            // Handle escape character
+            ('\\', _, false) => {
+                escape_next = true;
+            },
+            // Start or end quote
+            ('"', _, true) => {
+                current_tag.push('"');
+                escape_next = false;
+            },
+            ('"', false, false) => {
+                in_quotes = true;
+            },
+            ('"', true, false) => {
+                in_quotes = false;
+            },
+            // Space handling
+            (' ', false, false) => {
+                if !current_tag.is_empty() {
+                    tags.push(current_tag);
+                    current_tag = String::new();
+                }
+            },
+            // Regular character
+            (_, _, true) => {
+                current_tag.push('\\');
+                current_tag.push(c);
+                escape_next = false;
+            },
+            (_, _, false) => {
+                current_tag.push(c);
+            }
+        }
+    }
+    
+    // Don't forget the last tag if there is one
+    if !current_tag.is_empty() {
+        tags.push(current_tag);
+    }
+    
+    tags
 }
 
 /// Send just the embed without any files
