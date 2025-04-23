@@ -2,6 +2,7 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use std::env;
+use std::io::{self, Write, BufRead};
 use log::{info, warn, error, debug};
 use tokio::sync::Mutex;
 use simple_logger;
@@ -43,6 +44,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 info!("Running in post-track mode");
                 return post_single_track(&args[2]).await;
             },
+            "--generate-config" if args.len() > 2 => {
+                info!("Running in config generation mode");
+                return generate_config(&args[2]).await;
+            },
             "--help" | "-h" => {
                 info!("Showing help information");
                 println!("Usage:");
@@ -51,6 +56,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 println!("  scraper_webhook --init-tracks   - Initialize tracks database with existing tracks");
                 println!("  scraper_webhook --post-track ID - Post a specific track to webhook (bypass database)");
                 println!("                               - Can be a track ID or a SoundCloud URL");
+                println!("  scraper_webhook --generate-config URL - Generate config.json and users.json files");
+                println!("                               - URL should be a SoundCloud user profile");
                 println!("  scraper_webhook --help          - Show this help");
                 return Ok(());
             },
@@ -277,7 +284,7 @@ async fn initialize_tracks_database() -> Result<(), Box<dyn std::error::Error + 
     // Process each user
     for user_id in &users.users {
         info!("Fetching tracks for user {}", user_id);
-        match soundcloud::get_user_tracks(user_id, config.max_tracks_per_user).await {
+        match soundcloud::get_user_tracks(user_id, config.max_tracks_per_user, config.pagination_size, config.track_count_buffer).await {
             Ok(tracks) => {
                 info!("Found {} tracks for user {}", tracks.len(), user_id);
                 
@@ -495,7 +502,7 @@ async fn poll_user(
     db: &Arc<Mutex<TrackDatabase>>,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     // Fetch latest tracks from SoundCloud
-    let tracks = match soundcloud::get_user_tracks(user_id, config.max_tracks_per_user).await {
+    let tracks = match soundcloud::get_user_tracks(user_id, config.max_tracks_per_user, config.pagination_size, config.track_count_buffer).await {
         Ok(t) => t,
         Err(e) => {
             error!("Failed to fetch tracks for user {}: {}", user_id, e);
@@ -770,4 +777,223 @@ async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error::Er
     }
     
     Ok(())
+}
+
+/// Generate config.json and users.json files interactively based on a SoundCloud user's followings
+async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    println!("Generating configuration based on SoundCloud user: {}", url);
+    
+    // Initialize SoundCloud client
+    info!("Initializing SoundCloud client");
+    match soundcloud::initialize().await {
+        Ok(_) => info!("SoundCloud client initialized successfully"),
+        Err(e) => {
+            error!("Failed to initialize SoundCloud client: {}", e);
+            return Err(e);
+        }
+    }
+    
+    // Resolve the URL to get the user ID
+    info!("Resolving SoundCloud URL: {}", url);
+    let resolved = match soundcloud::resolve_url(url).await {
+        Ok(data) => data,
+        Err(e) => {
+            error!("Failed to resolve URL: {}", e);
+            return Err(e);
+        }
+    };
+    
+    // Check if this is a user
+    if let Some(kind) = resolved.get("kind").and_then(|v| v.as_str()) {
+        if kind != "user" {
+            error!("The URL does not point to a user account (found: {})", kind);
+            return Err(format!("URL points to a {}, not a user", kind).into());
+        }
+    } else {
+        error!("Could not determine object type from resolved URL");
+        return Err("Could not determine object type from resolved URL".into());
+    }
+    
+    // Get the user ID and username
+    let user_id = match resolved.get("id").and_then(|v| v.as_u64()) {
+        Some(id) => id.to_string(),
+        None => {
+            error!("Could not extract user ID from resolved URL");
+            return Err("Could not extract user ID from resolved URL".into());
+        }
+    };
+    
+    let username = resolved.get("username")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Unknown");
+    
+    info!("URL resolved to user ID: {} ({})", user_id, username);
+    println!("\nFound user: {} (ID: {})", username, user_id);
+    
+    // Ask if the user should also be included in the users.json
+    println!("\nDo you want to include {} in the users.json file? (Y/n): ", username);
+    let include_user = read_line_with_default("y");
+    let include_user = include_user.trim().to_lowercase() != "n";
+    
+    // Fetch the user's followings
+    println!("\nFetching users that {} follows...", username);
+    let followings = match soundcloud::get_user_followings(&user_id, None).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to fetch followings: {}", e);
+            return Err(e);
+        }
+    };
+    
+    println!("Found {} users that {} follows.", followings.len(), username);
+    
+    // Extract user IDs and usernames
+    let mut user_ids = Vec::new();
+    if include_user {
+        user_ids.push(user_id.clone());
+    }
+    
+    // Calculate the maximum username length for formatting
+    let max_username_len = followings.iter()
+        .filter_map(|u| u.get("username").and_then(|v| v.as_str()).map(|s| s.len()))
+        .max()
+        .unwrap_or(10);
+    
+    // Display the users with track counts
+    println!("\nFollowed users (with track counts):");
+    println!("{:<5} {:<1} {:<width$} {:<10} {:<12}", 
+             "No.", "", "Username", "Tracks", "ID", width=max_username_len);
+    println!("{}", "-".repeat(5 + 1 + max_username_len + 10 + 12 + 3));
+    
+    for (i, user) in followings.iter().enumerate() {
+        let following_id = user.get("id").and_then(|v| v.as_u64()).map(|id| id.to_string());
+        let following_username = user.get("username").and_then(|v| v.as_str()).unwrap_or("Unknown");
+        let track_count = user.get("track_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        
+        if let Some(id) = &following_id {
+            println!("{:<5} {:<1} {:<width$} {:<10} {:<12}", 
+                     i+1, "", following_username, track_count, id, width=max_username_len);
+            user_ids.push(id.clone());
+        }
+    }
+    
+    // Generate the config.json file
+    println!("\nGenerating config.json and users.json files...");
+    
+    // Ask for config values
+    println!("\nEnter Discord webhook URL [required]: ");
+    let discord_webhook_url = read_line();
+    if discord_webhook_url.trim().is_empty() {
+        error!("Discord webhook URL is required");
+        return Err("Discord webhook URL is required".into());
+    }
+    
+    println!("\nEnter log level [info]: ");
+    let log_level = read_line_with_default("info");
+    
+    println!("\nEnter poll interval in seconds [60]: ");
+    let poll_interval_sec = read_line_with_default("60")
+        .parse::<u64>()
+        .unwrap_or(60);
+    
+    println!("\nEnter users file path [users.json]: ");
+    let users_file = read_line_with_default("users.json");
+    
+    println!("\nEnter tracks file path [tracks.json]: ");
+    let tracks_file = read_line_with_default("tracks.json");
+    
+    println!("\nEnter maximum tracks to fetch per user [500]: ");
+    let max_tracks_per_user = read_line_with_default("500")
+        .parse::<usize>()
+        .unwrap_or(500);
+    
+    println!("\nEnter pagination size for API requests [50]: ");
+    let pagination_size = read_line_with_default("50")
+        .parse::<usize>()
+        .unwrap_or(50);
+    
+    println!("\nEnter track count buffer [5]: ");
+    let track_count_buffer = read_line_with_default("5")
+        .parse::<usize>()
+        .unwrap_or(5);
+    
+    println!("\nEnter temp directory [use system temp]: ");
+    let temp_dir = read_line_with_default("");
+    let temp_dir = if temp_dir.trim().is_empty() {
+        None
+    } else {
+        Some(temp_dir)
+    };
+    
+    println!("\nEnter maximum parallel user fetches [4]: ");
+    let max_parallel_fetches = read_line_with_default("4")
+        .parse::<usize>()
+        .unwrap_or(4);
+    
+    // Create the config
+    let config = Config {
+        discord_webhook_url,
+        log_level,
+        poll_interval_sec,
+        users_file: users_file.clone(),
+        tracks_file,
+        max_tracks_per_user,
+        pagination_size,
+        track_count_buffer,
+        temp_dir,
+        max_parallel_fetches,
+    };
+    
+    // Create the users
+    let users = Users {
+        users: user_ids,
+    };
+    
+    // Save config.json
+    let config_json = serde_json::to_string_pretty(&config)?;
+    std::fs::write("config.json", config_json)?;
+    
+    // Save users.json
+    let users_json = serde_json::to_string_pretty(&users)?;
+    std::fs::write(&users_file, users_json)?;
+    
+    println!("\nConfiguration completed!");
+    println!("- Created config.json file");
+    println!("- Created {} file with {} users", users_file, users.users.len());
+    println!("\nYou can now run the application in watcher mode:\n  ./scraper_webhook");
+    
+    Ok(())
+}
+
+/// Read a line from stdin
+fn read_line() -> String {
+    let stdin = io::stdin();
+    let mut line = String::new();
+    if stdin.lock().read_line(&mut line).is_ok() {
+        line.trim().to_string()
+    } else {
+        String::new()
+    }
+}
+
+/// Read a line from stdin with a default value
+fn read_line_with_default(default: &str) -> String {
+    let stdin = io::stdin();
+    let mut line = String::new();
+    
+    if !default.is_empty() {
+        print!("[{}]: ", default);
+        io::stdout().flush().unwrap();
+    }
+    
+    if stdin.lock().read_line(&mut line).is_ok() {
+        let input = line.trim();
+        if input.is_empty() {
+            default.to_string()
+        } else {
+            input.to_string()
+        }
+    } else {
+        default.to_string()
+    }
 }

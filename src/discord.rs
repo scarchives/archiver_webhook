@@ -55,14 +55,6 @@ pub async fn send_track_webhook(
 fn build_track_embed(track: &Track) -> Value {
     debug!("Building Discord embed for track '{}' (ID: {})", track.title, track.id);
     
-    // Format the track duration
-    let duration_secs = track.duration / 1000; // Convert from milliseconds
-    let duration_str = format!(
-        "{}:{:02}", 
-        duration_secs / 60, 
-        duration_secs % 60
-    );
-    
     // Extract additional metadata from raw_data if available
     let description = track.description.clone().unwrap_or_default();
     

@@ -36,3 +36,6 @@ examples/
 # Docker files
 .dockerignore
 docker-compose*.yml 
+
+# Backups
+*.bk

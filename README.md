@@ -40,7 +40,9 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
      "poll_interval_sec": 60,
      "users_file": "users.json",
      "tracks_file": "tracks.json",
-     "max_tracks_per_user": 200,
+     "max_tracks_per_user": 500,
+     "pagination_size": 50,
+     "track_count_buffer": 5,
      "temp_dir": null
    }
    ```
@@ -73,7 +75,9 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
 - `poll_interval_sec` (default: 60): How often to check for new tracks, in seconds
 - `users_file` (default: "users.json"): Path to the file containing user IDs to watch
 - `tracks_file` (default: "tracks.json"): Path to the tracks database file for persistent storage
-- `max_tracks_per_user` (default: 200): Maximum number of tracks to fetch per user
+- `max_tracks_per_user` (default: 500): Maximum number of tracks to fetch per user (total limit)
+- `pagination_size` (default: 50): Number of tracks to fetch per API request (pagination size)
+- `track_count_buffer` (default: 5): Extra tracks to fetch beyond a user's reported track count
 - `temp_dir` (optional): Directory for temporary files (if not specified, system temp dir is used)
 
 ## Usage
@@ -105,6 +109,21 @@ To post a specific track to Discord without adding it to the database:
 # Or with a URL
 ./scraper_webhook --post-track https://soundcloud.com/artist/track-name
 ```
+
+To interactively generate config.json and users.json based on a SoundCloud user's followings:
+
+```bash
+./scraper_webhook --generate-config https://soundcloud.com/user-to-follow
+```
+
+This will:
+1. Fetch the user's profile
+2. Get all users they follow
+3. Interactively create config.json with default values
+4. Generate users.json with all followed users' IDs
+5. Display track counts for each user for reference
+
+Defaults can be accepted by pressing Enter for each prompt.
 
 # Logging
 

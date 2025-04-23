@@ -23,6 +23,12 @@ pub struct Config {
     // Maximum tracks to fetch per user (prevents excessive API calls)
     #[serde(default = "default_max_tracks_per_user")]
     pub max_tracks_per_user: usize,
+    // Number of tracks to fetch per API request (pagination size)
+    #[serde(default = "default_pagination_size")]
+    pub pagination_size: usize,
+    // Buffer to add to user's track count to account for new uploads
+    #[serde(default = "default_track_count_buffer")]
+    pub track_count_buffer: usize,
     // Temp directory for downloads (uses system temp if not specified)
     pub temp_dir: Option<String>,
     /// Maximum number of parallel user fetches
@@ -43,7 +49,17 @@ fn default_tracks_file() -> String {
 }
 
 fn default_max_tracks_per_user() -> usize {
-    200
+    500 // Default to 500 total tracks per user (limit)
+}
+
+/// Default pagination size for SoundCloud API calls
+fn default_pagination_size() -> usize {
+    50 // Default to 50 tracks per API request
+}
+
+/// Default buffer to add to user's track count
+fn default_track_count_buffer() -> usize {
+    5 // Add 5 extra tracks to account for new uploads
 }
 
 /// Default log level if not specified in config.json
@@ -64,6 +80,8 @@ impl Default for Config {
             users_file: default_users_file(),
             tracks_file: default_tracks_file(),
             max_tracks_per_user: default_max_tracks_per_user(),
+            pagination_size: default_pagination_size(),
+            track_count_buffer: default_track_count_buffer(),
             temp_dir: None,
             max_parallel_fetches: default_max_parallel_fetches(),
         }
