@@ -1,4 +1,4 @@
-# SoundCloud Scraper Webhook
+# SoundCloud Archiver Webhook
 
 A Rust application that watches SoundCloud users for new tracks and sends them to a Discord webhook with rich formatting and audio files.
 
@@ -87,33 +87,33 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
 Run the application in watcher mode (default):
 
 ```bash
-./scraper_webhook
+./archiver_webhook
 ```
 
 To resolve a SoundCloud URL and get information (artist, track, user info):
 
 ```bash
-./scraper_webhook --resolve https://soundcloud.com/artist/track-name
+./archiver_webhook --resolve https://soundcloud.com/artist/track-name
 ```
 
 To initialize the tracks database with all existing tracks from watched users:
 
 ```bash
-./scraper_webhook --init-tracks
+./archiver_webhook --init-tracks
 ```
 
 To post a specific track to Discord without adding it to the database:
 
 ```bash
-./scraper_webhook --post-track 1234567890
+./archiver_webhook --post-track 1234567890
 # Or with a URL
-./scraper_webhook --post-track https://soundcloud.com/artist/track-name
+./archiver_webhook --post-track https://soundcloud.com/artist/track-name
 ```
 
 To interactively generate config.json and users.json based on a SoundCloud user's followings:
 
 ```bash
-./scraper_webhook --generate-config https://soundcloud.com/user-to-follow
+./archiver_webhook --generate-config https://soundcloud.com/user-to-follow
 ```
 
 This will:
@@ -146,20 +146,16 @@ You can use the Docker image from GitHub Container Registry, which is automatica
 
 ```bash
 # Pull the latest image
-docker pull ghcr.io/scarchive/scraper_webhook:latest
+docker pull ghcr.io/scarchive/archiver_webhook:latest
 
 # Run with your configuration files
-docker run -d --name scraper_webhook \
+docker run -d --name archiver_webhook \
   -v "$(pwd)/config.json:/app/config.json:ro" \
   -v "$(pwd)/users.json:/app/users.json:rw" \
   -v "$(pwd)/tracks.json:/app/tracks.json:rw" \
   -v "$(pwd)/temp:/app/temp:rw" \
-  ghcr.io/scarchive/scraper_webhook:latest
+  ghcr.io/scarchive/archiver_webhook:latest
 ```
-
-Available tags:
-- `latest` - Always points to the most recent build from the master branch
-- `<commit-sha>` - Points to a specific commit (useful for pinning to a specific version)
 
 #### Using Docker Compose (recommended)
 
@@ -169,9 +165,9 @@ Create a `docker-compose.yml` file:
 version: '3'
 
 services:
-  scraper_webhook:
-    image: ghcr.io/scarchive/scraper_webhook:latest
-    container_name: scraper_webhook
+  archiver_webhook:
+    image: ghcr.io/scarchive/archiver_webhook:latest
+    container_name: archiver_webhook
     restart: unless-stopped
     volumes:
       - ./config.json:/app/config.json:ro
@@ -197,13 +193,13 @@ Run one-time commands:
 
 ```bash
 # Resolve a SoundCloud URL
-docker-compose run --rm scraper_webhook --resolve https://soundcloud.com/artist/track-name
+docker-compose run --rm archiver_webhook --resolve https://soundcloud.com/artist/track-name
 
 # Initialize tracks database
-docker-compose run --rm scraper_webhook --init-tracks
+docker-compose run --rm archiver_webhook --init-tracks
 
 # Post a specific track
-docker-compose run --rm scraper_webhook --post-track 1234567890
+docker-compose run --rm archiver_webhook --post-track 1234567890
 ```
 
 #### Building the Image Locally
@@ -211,18 +207,18 @@ docker-compose run --rm scraper_webhook --post-track 1234567890
 Build the image:
 
 ```bash
-docker build -t scraper_webhook .
+docker build -t archiver_webhook .
 ```
 
 Run in watcher mode:
 
 ```bash
-docker run -d --name scraper_webhook \
+docker run -d --name archiver_webhook \
   -v "$(pwd)/config.json:/app/config.json:ro" \
   -v "$(pwd)/users.json:/app/users.json:rw" \
   -v "$(pwd)/tracks.json:/app/tracks.json:rw" \
   -v "$(pwd)/temp:/app/temp:rw" \
-  scraper_webhook
+  archiver_webhook
 ```
 
 Run one-time commands:
@@ -233,7 +229,7 @@ docker run --rm \
   -v "$(pwd)/users.json:/app/users.json:rw" \
   -v "$(pwd)/tracks.json:/app/tracks.json:rw" \
   -v "$(pwd)/temp:/app/temp:rw" \
-  scraper_webhook --resolve https://soundcloud.com/artist/track-name
+  archiver_webhook --resolve https://soundcloud.com/artist/track-name
 ```
 
 ## How to Find SoundCloud User IDs

@@ -82,8 +82,8 @@ jobs:
         with:
           name: scraper-${{ matrix.target }}
           path: |
-            target/${{ matrix.target }}/release/scraper_webhook*
-            !target/${{ matrix.target }}/release/scraper_webhook.d
+            target/${{ matrix.target }}/release/archiver_webhook*
+            !target/${{ matrix.target }}/release/archiver_webhook.d
           if-no-files-found: warn
           compression-level: 6
           retention-days: 5

@@ -21,7 +21,7 @@ use db::TrackDatabase;
 async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     // Initialize logger
     setup_logger();
-    info!("[scraper_webhook] Starting up v{}", env!("CARGO_PKG_VERSION"));
+    info!("[archiver_webhook] Starting up v{}", env!("CARGO_PKG_VERSION"));
     
     // Log system info
     log_system_info();
@@ -51,14 +51,14 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             "--help" | "-h" => {
                 info!("Showing help information");
                 println!("Usage:");
-                println!("  scraper_webhook                 - Run in watcher mode");
-                println!("  scraper_webhook --resolve URL   - Resolve a SoundCloud URL and display info");
-                println!("  scraper_webhook --init-tracks   - Initialize tracks database with existing tracks");
-                println!("  scraper_webhook --post-track ID - Post a specific track to webhook (bypass database)");
+                println!("  archiver_webhook                 - Run in watcher mode");
+                println!("  archiver_webhook --resolve URL   - Resolve a SoundCloud URL and display info");
+                println!("  archiver_webhook --init-tracks   - Initialize tracks database with existing tracks");
+                println!("  archiver_webhook --post-track ID - Post a specific track to webhook (bypass database)");
                 println!("                               - Can be a track ID or a SoundCloud URL");
-                println!("  scraper_webhook --generate-config URL - Generate config.json and users.json files");
+                println!("  archiver_webhook --generate-config URL - Generate config.json and users.json files");
                 println!("                               - URL should be a SoundCloud user profile");
-                println!("  scraper_webhook --help          - Show this help");
+                println!("  archiver_webhook --help          - Show this help");
                 return Ok(());
             },
             _ => {
@@ -960,7 +960,7 @@ async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error + Se
     println!("\nConfiguration completed!");
     println!("- Created config.json file");
     println!("- Created {} file with {} users", users_file, users.users.len());
-    println!("\nYou can now run the application in watcher mode:\n  ./scraper_webhook");
+    println!("\nYou can now run the application in watcher mode:\n  ./archiver_webhook");
     
     Ok(())
 }

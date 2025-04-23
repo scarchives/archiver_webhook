@@ -1,5 +1,5 @@
 [package]
-name = "scraper_webhook"
+name = "archiver_webhook"
 version = "0.1.0"
 edition = "2021"
 
