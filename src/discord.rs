@@ -130,13 +130,6 @@ fn build_track_embed(track: &Track) -> Value {
         }
     }
     
-    // Add download status
-    fields.push(json!({
-        "name": "Downloadable",
-        "value": if downloadable { "Yes" } else { "No" },
-        "inline": true
-    }));
-    
     debug!("Created {} embed fields for Discord message", fields.len());
     
     // Get original high-resolution artwork URL if available
