@@ -293,7 +293,10 @@ async fn initialize_tracks_database() -> Result<(), Box<dyn std::error::Error + 
                 
                 // Add to database
                 let current_count = db.get_all_tracks().len();
-                db.initialize_with_tracks(&track_ids);
+                if let Err(e) = db.initialize_with_tracks(&track_ids) {
+                    error!("Failed to initialize database with tracks: {}", e);
+                    continue;
+                }
                 let new_count = db.get_all_tracks().len();
                 
                 let added = new_count - current_count;
@@ -308,7 +311,7 @@ async fn initialize_tracks_database() -> Result<(), Box<dyn std::error::Error + 
         }
     }
     
-    // Save database
+    // Save database - this is now redundant but kept for safety
     if let Err(e) = db.save() {
         error!("Failed to save tracks database: {}", e);
         return Err(e);
@@ -397,6 +400,14 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
         }
     }
     
+    // Initialize signal handlers for clean shutdown
+    #[cfg(unix)]
+    let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+        .expect("Failed to set up SIGINT handler");
+    #[cfg(unix)]
+    let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        .expect("Failed to set up SIGTERM handler");
+    
     // Create scheduler interval
     let poll_interval = Duration::from_secs(config.poll_interval_sec);
     let mut interval = tokio::time::interval(poll_interval);
@@ -409,9 +420,46 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
     let total_new_tracks_overall = 0;
     let mut last_stats_time = std::time::Instant::now();
     
+    // Main loop with graceful shutdown support
     loop {
-        // Wait for next tick
-        interval.tick().await;
+        // Wait for either the next tick or a shutdown signal
+        #[cfg(unix)]
+        let should_shutdown = tokio::select! {
+            _ = interval.tick() => false,
+            _ = sigint.recv() => {
+                info!("Received SIGINT signal");
+                true
+            },
+            _ = sigterm.recv() => {
+                info!("Received SIGTERM signal");
+                true
+            },
+        };
+        
+        #[cfg(not(unix))]
+        let should_shutdown = tokio::select! {
+            _ = interval.tick() => false,
+            _ = tokio::signal::ctrl_c() => {
+                info!("Received Ctrl+C signal");
+                true
+            },
+        };
+        
+        if should_shutdown {
+            info!("Shutdown signal received, performing clean shutdown");
+            
+            // Save the database
+            {
+                let db_guard = db.lock().await;
+                if let Err(e) = db_guard.shutdown() {
+                    error!("Error during database shutdown: {}", e);
+                }
+            }
+            
+            info!("Application shutdown complete");
+            break;
+        }
+        
         total_polls += 1;
         
         // Log periodic stats (every hour)
@@ -493,6 +541,8 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
             debug!("Poll #{} completed: no new tracks", total_polls);
         }
     }
+    
+    Ok(())
 }
 
 /// Poll a user for new tracks, process them, and send to Discord
@@ -518,7 +568,14 @@ async fn poll_user(
     // Update database
     let new_track_ids = {
         let mut db_guard = db.lock().await;
-        db_guard.add_tracks(&track_ids)
+        // Use the new add_tracks_and_save method to ensure immediate persistence
+        match db_guard.add_tracks_and_save(&track_ids) {
+            Ok(new_ids) => new_ids,
+            Err(e) => {
+                error!("Error adding and saving tracks: {}", e);
+                return Err(e.into());
+            }
+        }
     };
     
     if new_track_ids.is_empty() {
