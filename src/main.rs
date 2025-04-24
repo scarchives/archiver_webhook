@@ -84,8 +84,39 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 /// Setup logger with appropriate configuration
 fn setup_logger() {
-    // Initialize simple logger with default info level
-    if let Err(e) = simple_logger::init() {
+    // Load config to get log level if available
+    let config_path = "config.json";
+    let log_level = match std::fs::File::open(config_path) {
+        Ok(file) => {
+            let reader = std::io::BufReader::new(file);
+            match serde_json::from_reader::<_, serde_json::Value>(reader) {
+                Ok(config) => {
+                    // Extract log level from config
+                    config.get("log_level")
+                        .and_then(|l| l.as_str())
+                        .unwrap_or("info")
+                        .to_string()
+                },
+                Err(_) => "info".to_string()
+            }
+        },
+        Err(_) => "info".to_string()
+    };
+    
+    // Parse log level string to LevelFilter
+    let level_filter = match log_level.to_lowercase().as_str() {
+        "trace" => LevelFilter::Trace,
+        "debug" => LevelFilter::Debug,
+        "info" => LevelFilter::Info,
+        "warn" => LevelFilter::Warn,
+        "error" => LevelFilter::Error,
+        _ => LevelFilter::Info,
+    };
+    
+    // Initialize logger with the configured level
+    if let Err(e) = simple_logger::SimpleLogger::new()
+        .with_level(level_filter)
+        .init() {
         eprintln!("Failed to initialize logger: {}", e);
     }
 }
@@ -99,8 +130,44 @@ fn log_system_info() {
     debug!("  Temp directory: {:?}", env::temp_dir());
 }
 
+/// Update the log level at runtime
+fn update_log_level(level_str: &str) {
+    let level_filter = match level_str.to_lowercase().as_str() {
+        "trace" => LevelFilter::Trace,
+        "debug" => LevelFilter::Debug,
+        "info" => LevelFilter::Info,
+        "warn" => LevelFilter::Warn,
+        "error" => LevelFilter::Error,
+        _ => {
+            warn!("Invalid log level '{}', defaulting to info", level_str);
+            LevelFilter::Info
+        }
+    };
+    
+    // Set the log level
+    log::set_max_level(level_filter);
+    info!("Log level set to {}", level_str);
+}
+
 /// Resolve a SoundCloud URL and display information
 async fn resolve_soundcloud_url(url: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Load config to get log level
+    let config_path = "config.json";
+    debug!("Loading configuration from {}", config_path);
+    let config = match Config::load(config_path) {
+        Ok(c) => {
+            debug!("Configuration loaded successfully");
+            debug!("Log level: {}", c.log_level);
+            // Update log level based on config
+            update_log_level(&c.log_level);
+            c
+        },
+        Err(e) => {
+            error!("Failed to load config: {}", e);
+            return Err(e);
+        }
+    };
+    
     info!("Resolving SoundCloud URL: {}", url);
     
     // Initialize SoundCloud client
@@ -228,6 +295,11 @@ async fn initialize_tracks_database() -> Result<(), Box<dyn std::error::Error + 
     let config = match Config::load(config_path) {
         Ok(c) => {
             debug!("Configuration loaded successfully");
+            debug!("Log level: {}", c.log_level);
+            debug!("Users file: {}", c.users_file);
+            debug!("Tracks file: {}", c.tracks_file);
+            // Update log level based on config
+            update_log_level(&c.log_level);
             c
         },
         Err(e) => {
@@ -332,14 +404,7 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
     info!("Loading configuration from {}", config_path);
     let config = match Config::load(config_path) {
         Ok(c) => {
-            // Configure log filter based on config
-            match c.log_level.parse::<LevelFilter>() {
-                Ok(level) => log::set_max_level(level),
-                Err(_) => {
-                    warn!("Invalid log_level '{}' in config.json; defaulting to 'info'", c.log_level);
-                    log::set_max_level(LevelFilter::Info);
-                }
-            }
+            // Log level is now set in setup_logger()
             debug!("Configuration loaded successfully");
             debug!("Poll interval: {} seconds", c.poll_interval_sec);
             debug!("Users file: {}", c.users_file);
@@ -683,6 +748,10 @@ async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error::Er
     let config = match Config::load(config_path) {
         Ok(c) => {
             debug!("Configuration loaded successfully");
+            debug!("Log level: {}", c.log_level);
+            debug!("Webhook URL: {}", c.discord_webhook_url);
+            // Update log level based on config
+            update_log_level(&c.log_level);
             c
         },
         Err(e) => {
