@@ -65,7 +65,6 @@ fn build_track_embed(track: &Track) -> Value {
     let comment_count: Option<u64>;
     let genre: Option<String>;
     let tags: Option<String>;
-    let downloadable: bool;
     
     if let Some(raw_data) = &track.raw_data {
         // Get play count
@@ -86,8 +85,6 @@ fn build_track_embed(track: &Track) -> Value {
         // Get tags
         tags = raw_data.get("tag_list").and_then(|v| v.as_str()).map(String::from);
         
-        // Check if downloadable
-        downloadable = raw_data.get("downloadable").and_then(|v| v.as_bool()).unwrap_or(false);
     } else {
         // Use values from the track struct directly if available
         play_count = track.playback_count;
@@ -96,7 +93,6 @@ fn build_track_embed(track: &Track) -> Value {
         comment_count = track.comment_count;
         genre = track.genre.clone();
         tags = track.tag_list.clone();
-        downloadable = track.downloadable.unwrap_or(false);
     }
     
     debug!("Track metadata - plays: {:?}, likes: {:?}, reposts: {:?}, comments: {:?}", 
