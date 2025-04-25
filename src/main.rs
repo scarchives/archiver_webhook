@@ -528,6 +528,10 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
     // Counter for auto follow checking
     let mut follow_check_counter = 0;
     
+    // Counter for database saving
+    let mut db_save_counter = 0;
+    let mut db_needs_saving = false;
+    
     // Main loop with graceful shutdown support
     loop {
         // Wait for either the next tick or a shutdown signal
@@ -648,7 +652,12 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
             // Wait for all tasks in this batch to complete
             for task in tasks {
                 match task.await {
-                    Ok((_user_id, Ok(count))) => total_new_tracks += count,
+                    Ok((_user_id, Ok(count))) => {
+                        total_new_tracks += count;
+                        if count > 0 {
+                            db_needs_saving = true;
+                        }
+                    },
                     Ok((_user_id, Err(_))) => {
                         // Error already logged in poll_user
                     },
@@ -661,12 +670,30 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
             users_processed += batch_size;
         }
 
-        // Save the database after all users have been processed
-        {
-            let db_guard = db.lock().await;
-            if let Err(e) = db_guard.save() {
-                warn!("Failed to save tracks database: {}", e);
+        // Increment the database save counter
+        db_save_counter += 1;
+        
+        // Save the database if needed and it's time to save or we found new tracks
+        if db_needs_saving || db_save_counter >= config.db_save_interval {
+            debug!("Saving database (interval={}, current={}, new_tracks={})",
+                  config.db_save_interval, db_save_counter, total_new_tracks);
+            
+            {
+                let db_guard = db.lock().await;
+                if let Err(e) = db_guard.save() {
+                    warn!("Failed to save tracks database: {}", e);
+                } else {
+                    if db_needs_saving {
+                        debug!("Database saved successfully after finding new tracks");
+                    } else {
+                        debug!("Database saved successfully (scheduled save)");
+                    }
+                }
             }
+            
+            // Reset the counter and flag
+            db_save_counter = 0;
+            db_needs_saving = false;
         }
 
         if total_new_tracks > 0 {
@@ -740,14 +767,39 @@ async fn poll_user(
         return Ok(0); // No new tracks
     }
     
-    // Process new tracks (send webhook, etc.)
-    let mut new_tracks_processed = 0;
+    // Process new tracks in parallel with a resource limit for ffmpeg
+    // Default to maximum of 2 concurrent ffmpeg processes per user task unless configured differently
+    let max_concurrent_processing = config.max_concurrent_processing;
+    let processing_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent_processing));
+    
+    let mut tasks = Vec::new();
     
     for track_id in &new_track_ids {
         // Find the track in our collection
-        let track = all_tracks.iter().find(|t| &t.id == track_id);
+        let track = match all_tracks.iter().find(|t| &t.id == track_id) {
+            Some(t) => t.clone(),
+            None => {
+                warn!("Could not find track {} in fetched tracks - skipping", track_id);
+                continue;
+            }
+        };
         
-        if let Some(track) = track {
+        let semaphore_clone = processing_semaphore.clone();
+        let config_clone = config.clone();
+        let webhook_url = config.discord_webhook_url.clone();
+        let temp_dir = config.temp_dir.clone();
+        
+        // Spawn a task to process this track
+        let task = tokio::spawn(async move {
+            // Acquire semaphore to limit concurrent ffmpeg processes
+            let _permit = match semaphore_clone.acquire().await {
+                Ok(permit) => permit,
+                Err(e) => {
+                    error!("Failed to acquire semaphore for track {}: {}", track.id, e);
+                    return false;
+                }
+            };
+            
             debug!("Processing new track: {} (ID: {})", track.title, track.id);
             
             // Get full track details
@@ -755,12 +807,12 @@ async fn poll_user(
                 Ok(t) => t,
                 Err(e) => {
                     error!("Failed to get track details for {}: {}", track.id, e);
-                    continue;
+                    return false;
                 }
             };
             
             // Process audio files if possible
-            let processing_result = match audio::process_track_audio(&track_details, config.temp_dir.as_deref()).await {
+            let processing_result = match audio::process_track_audio(&track_details, temp_dir.as_deref()).await {
                 Ok((mp3, ogg, artwork, json)) => {
                     debug!("Successfully processed audio for track {}", track.id);
                     
@@ -814,12 +866,11 @@ async fn poll_user(
             };
             
             // Send to Discord
-            match discord::send_track_webhook(&config.discord_webhook_url, &track_details, Some(processing_result.clone())).await {
+            match discord::send_track_webhook(&webhook_url, &track_details, Some(processing_result.clone())).await {
                 Ok(_) => {
                     info!("Successfully sent webhook for track: {} by {}", 
                           track_details.title, track_details.user.username);
-                    new_tracks_processed += 1;
-                }
+                },
                 Err(e) => {
                     error!("Failed to send webhook for track {}: {}", track.id, e);
                 }
@@ -830,6 +881,26 @@ async fn poll_user(
                 if let Err(e) = audio::delete_temp_file(&path).await {
                     warn!("Failed to clean up temp file {}: {}", path, e);
                 }
+            }
+            
+            true // Indicate success
+        });
+        
+        tasks.push(task);
+    }
+    
+    // Wait for all track processing tasks to complete
+    let mut new_tracks_processed = 0;
+    
+    for task in tasks {
+        match task.await {
+            Ok(success) => {
+                if success {
+                    new_tracks_processed += 1;
+                }
+            },
+            Err(e) => {
+                error!("Error in track processing task: {}", e);
             }
         }
     }
@@ -1176,6 +1247,16 @@ async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error + Se
         .parse::<usize>()
         .unwrap_or(24);
     
+    println!("\nMaximum concurrent ffmpeg processes per user [2]: ");
+    let max_concurrent_processing = read_line_with_default("2")
+        .parse::<usize>()
+        .unwrap_or(2);
+    
+    println!("\nHow often to save the database (in poll cycles) [1]: ");
+    let db_save_interval = read_line_with_default("1")
+        .parse::<usize>()
+        .unwrap_or(1);
+    
     // Create the config
     let config = Config {
         discord_webhook_url,
@@ -1192,6 +1273,8 @@ async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error + Se
         max_likes_per_user,
         auto_follow_source,
         auto_follow_interval,
+        max_concurrent_processing,
+        db_save_interval,
     };
     
     // Create the users

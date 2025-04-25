@@ -148,52 +148,117 @@ pub async fn process_track_audio(
     let mut mp3_result = None;
     let mut ogg_result = None;
     
-    // Process MP3 (preferring HLS if available)
-    if let Some(url) = hls_url.as_ref().or(stream_url.as_ref()) {
-        info!("Starting MP3 transcoding for track {}", track.id);
-        debug!("Input URL: {}", url);
-        debug!("Output path: {}", mp3_path.display());
+    // Process MP3 and OGG in parallel (if possible)
+    if let (Some(mp3_url), Some(ogg_url)) = (hls_url.as_ref().or(stream_url.as_ref()), hls_url.as_ref()) {
+        info!("Starting parallel MP3 and OGG transcoding for track {}", track.id);
         
-        match transcode_to_mp3(url, &mp3_path).await {
-            Ok(_) => {
-                let file_size = match fs::metadata(&mp3_path) {
-                    Ok(metadata) => metadata.len(),
-                    Err(_) => 0,
-                };
-                
-                mp3_result = Some(mp3_path.to_string_lossy().to_string());
-                info!("Successfully transcoded to MP3: {} ({} bytes)", mp3_path.display(), file_size);
+        // Create tasks for both conversions
+        let mp3_path_clone = mp3_path.clone();
+        let ogg_path_clone = ogg_path.clone();
+        let mp3_url_clone = mp3_url.clone();
+        let ogg_url_clone = ogg_url.clone();
+        
+        // Spawn tasks for parallel processing
+        let mp3_task = tokio::spawn(async move {
+            debug!("MP3 transcoding task started");
+            match transcode_to_mp3(&mp3_url_clone, &mp3_path_clone).await {
+                Ok(_) => {
+                    let file_size = match fs::metadata(&mp3_path_clone) {
+                        Ok(metadata) => metadata.len(),
+                        Err(_) => 0,
+                    };
+                    
+                    info!("Successfully transcoded to MP3: {} ({} bytes)", mp3_path_clone.display(), file_size);
+                    Some(mp3_path_clone.to_string_lossy().to_string())
+                },
+                Err(e) => {
+                    error!("Failed to transcode to MP3: {}", e);
+                    None
+                }
+            }
+        });
+        
+        let ogg_task = tokio::spawn(async move {
+            debug!("OGG transcoding task started");
+            match transcode_to_ogg(&ogg_url_clone, &ogg_path_clone).await {
+                Ok(_) => {
+                    let file_size = match fs::metadata(&ogg_path_clone) {
+                        Ok(metadata) => metadata.len(),
+                        Err(_) => 0,
+                    };
+                    
+                    info!("Successfully transcoded to OGG: {} ({} bytes)", ogg_path_clone.display(), file_size);
+                    Some(ogg_path_clone.to_string_lossy().to_string())
+                },
+                Err(e) => {
+                    error!("Failed to transcode to OGG: {}", e);
+                    None
+                }
+            }
+        });
+        
+        // Wait for both tasks to complete
+        match tokio::try_join!(mp3_task, ogg_task) {
+            Ok((mp3_res, ogg_res)) => {
+                mp3_result = mp3_res;
+                ogg_result = ogg_res;
+                debug!("Parallel transcoding completed - MP3: {}, OGG: {}", 
+                      mp3_result.is_some(), ogg_result.is_some());
             },
             Err(e) => {
-                error!("Failed to transcode to MP3: {}", e);
+                error!("Error in parallel transcoding tasks: {}", e);
+                // Continue with any successful results from individual tasks
             }
         }
     } else {
-        warn!("No URL available for MP3 transcoding");
-    }
-    
-    // Process OGG (only from HLS for better quality)
-    if let Some(url) = &hls_url {
-        info!("Starting OGG transcoding for track {}", track.id);
-        debug!("Input URL: {}", url);
-        debug!("Output path: {}", ogg_path.display());
-        
-        match transcode_to_ogg(url, &ogg_path).await {
-            Ok(_) => {
-                let file_size = match fs::metadata(&ogg_path) {
-                    Ok(metadata) => metadata.len(),
-                    Err(_) => 0,
-                };
-                
-                ogg_result = Some(ogg_path.to_string_lossy().to_string());
-                info!("Successfully transcoded to OGG: {} ({} bytes)", ogg_path.display(), file_size);
-            },
-            Err(e) => {
-                error!("Failed to transcode to OGG: {}", e);
+        // Fall back to sequential processing if we don't have both URL types
+        // Process MP3 (preferring HLS if available)
+        if let Some(url) = hls_url.as_ref().or(stream_url.as_ref()) {
+            info!("Starting MP3 transcoding for track {}", track.id);
+            debug!("Input URL: {}", url);
+            debug!("Output path: {}", mp3_path.display());
+            
+            match transcode_to_mp3(url, &mp3_path).await {
+                Ok(_) => {
+                    let file_size = match fs::metadata(&mp3_path) {
+                        Ok(metadata) => metadata.len(),
+                        Err(_) => 0,
+                    };
+                    
+                    mp3_result = Some(mp3_path.to_string_lossy().to_string());
+                    info!("Successfully transcoded to MP3: {} ({} bytes)", mp3_path.display(), file_size);
+                },
+                Err(e) => {
+                    error!("Failed to transcode to MP3: {}", e);
+                }
             }
+        } else {
+            warn!("No URL available for MP3 transcoding");
         }
-    } else {
-        warn!("No HLS URL available for OGG transcoding");
+        
+        // Process OGG (only from HLS for better quality)
+        if let Some(url) = &hls_url {
+            info!("Starting OGG transcoding for track {}", track.id);
+            debug!("Input URL: {}", url);
+            debug!("Output path: {}", ogg_path.display());
+            
+            match transcode_to_ogg(url, &ogg_path).await {
+                Ok(_) => {
+                    let file_size = match fs::metadata(&ogg_path) {
+                        Ok(metadata) => metadata.len(),
+                        Err(_) => 0,
+                    };
+                    
+                    ogg_result = Some(ogg_path.to_string_lossy().to_string());
+                    info!("Successfully transcoded to OGG: {} ({} bytes)", ogg_path.display(), file_size);
+                },
+                Err(e) => {
+                    error!("Failed to transcode to OGG: {}", e);
+                }
+            }
+        } else {
+            warn!("No HLS URL available for OGG transcoding");
+        }
     }
     
     // If everything failed, return error

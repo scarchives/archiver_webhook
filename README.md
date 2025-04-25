@@ -14,6 +14,7 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
 - Automatic client ID regeneration
 - Optional scraping of users' liked tracks
 - Auto-follow mode to automatically add new followings from a source user
+- Parallel processing of tracks and transcoding operations
 
 ## Requirements
 
@@ -47,10 +48,12 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
      "track_count_buffer": 5,
      "temp_dir": null,
      "max_parallel_fetches": 4,
+     "max_concurrent_processing": 2,
      "scrape_user_likes": false,
      "max_likes_per_user": 500,
      "auto_follow_source": null,
-     "auto_follow_interval": 24
+     "auto_follow_interval": 24,
+     "db_save_interval": 1
    }
    ```
 4. Create a `users.json` file with the SoundCloud user IDs to watch:
@@ -75,86 +78,7 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
    mkdir -p temp
    ```
 
-## Configuration Options
-
-- `discord_webhook_url` (required): The Discord webhook URL to send track notifications to
-- `log_level` (default: "info"): Logging level for the application
-- `poll_interval_sec` (default: 60): How often to check for new tracks, in seconds
-- `users_file` (default: "users.json"): Path to the file containing user IDs to watch
-- `tracks_file` (default: "tracks.json"): Path to the tracks database file for persistent storage
-- `max_tracks_per_user` (default: 500): Maximum number of tracks to fetch per user (total limit)
-- `pagination_size` (default: 50): Number of tracks to fetch per API request (pagination size)
-- `track_count_buffer` (default: 5): Extra tracks to fetch beyond a user's reported track count
-- `temp_dir` (optional): Directory for temporary files (if not specified, system temp dir is used)
-- `max_parallel_fetches` (default: 4): Maximum number of users to process in parallel
-- `scrape_user_likes` (default: false): Whether to scrape liked tracks from users being monitored
-- `max_likes_per_user` (default: 500): Maximum number of likes to fetch for each user when `scrape_user_likes` is enabled
-- `auto_follow_source` (optional): User ID or URL whose followings you want to automatically add to your watched users
-- `auto_follow_interval` (default: 24): How often to check for new followings (in poll cycles). Checking is also performed once immediately on startup.
-
-## Usage
-
-### Standard Installation
-
-Run the application in watcher mode (default):
-
-```bash
-./archiver_webhook
-```
-
-To resolve a SoundCloud URL and get information (artist, track, user info):
-
-```bash
-./archiver_webhook --resolve https://soundcloud.com/artist/track-name
-```
-
-To initialize the tracks database with all existing tracks from watched users:
-
-```bash
-./archiver_webhook --init-tracks
-```
-
-To post a specific track to Discord without adding it to the database:
-
-```bash
-./archiver_webhook --post-track 1234567890
-# Or with a URL
-./archiver_webhook --post-track https://soundcloud.com/artist/track-name
-```
-
-To interactively generate config.json and users.json based on a SoundCloud user's followings:
-
-```bash
-./archiver_webhook --generate-config https://soundcloud.com/user-to-follow
-```
-
-This will:
-1. Fetch the user's profile
-2. Get all users they follow
-3. Interactively create config.json with default values
-4. Generate users.json with all followed users' IDs
-5. Display track counts for each user for reference
-
-Defaults can be accepted by pressing Enter for each prompt.
-
-# Logging
-
-Logging is now controlled by the `log_level` field in your `config.json`.
-Valid values: `trace`, `debug`, `info`, `warn`, `error` (default: `info`).
-
-Example:
-```json
-{
-  "log_level": "debug",
-  ...
-}
-```
-
-### Docker Installation
-
 #### Using Pre-built Image
-
-You can use the Docker image from GitHub Container Registry, which is automatically updated with every push to the master branch:
 
 ```bash
 # Pull the latest image
@@ -242,6 +166,83 @@ docker run --rm \
   -v "$(pwd)/tracks.json:/app/tracks.json:rw" \
   -v "$(pwd)/temp:/app/temp:rw" \
   archiver_webhook --resolve https://soundcloud.com/artist/track-name
+```
+
+## Configuration Options
+
+- `discord_webhook_url` (required): The Discord webhook URL to send track notifications to
+- `log_level` (default: "info"): Logging level for the application
+- `poll_interval_sec` (default: 60): How often to check for new tracks, in seconds
+- `users_file` (default: "users.json"): Path to the file containing user IDs to watch
+- `tracks_file` (default: "tracks.json"): Path to the tracks database file for persistent storage
+- `max_tracks_per_user` (default: 500): Maximum number of tracks to fetch per user (total limit)
+- `pagination_size` (default: 50): Number of tracks to fetch per API request (pagination size)
+- `track_count_buffer` (default: 5): Extra tracks to fetch beyond a user's reported track count
+- `temp_dir` (optional): Directory for temporary files (if not specified, system temp dir is used)
+- `max_parallel_fetches` (default: 4): Maximum number of users to process in parallel
+- `max_concurrent_processing` (default: 2): Maximum number of concurrent ffmpeg processes per user
+- `scrape_user_likes` (default: false): Whether to scrape liked tracks from users being monitored
+- `max_likes_per_user` (default: 500): Maximum number of likes to fetch for each user when `scrape_user_likes` is enabled
+- `auto_follow_source` (optional): User ID or URL whose followings you want to automatically add to your watched users
+- `auto_follow_interval` (default: 24): How often to check for new followings (in poll cycles). Checking is also performed once immediately on startup.
+- `db_save_interval` (default: 1): How often to save the database (in poll cycles). Database is also saved immediately when new tracks are found.
+
+## Usage
+
+### Standard Installation
+
+Run the application in watcher mode (default):
+
+```bash
+./archiver_webhook
+```
+
+To resolve a SoundCloud URL and get information (artist, track, user info):
+
+```bash
+./archiver_webhook --resolve https://soundcloud.com/artist/track-name
+```
+
+To initialize the tracks database with all existing tracks from watched users:
+
+```bash
+./archiver_webhook --init-tracks
+```
+
+To post a specific track to Discord without adding it to the database:
+
+```bash
+./archiver_webhook --post-track 1234567890
+# Or with a URL
+./archiver_webhook --post-track https://soundcloud.com/artist/track-name
+```
+
+To interactively generate config.json and users.json based on a SoundCloud user's followings:
+
+```bash
+./archiver_webhook --generate-config https://soundcloud.com/user-to-follow
+```
+
+This will:
+1. Fetch the user's profile
+2. Get all users they follow
+3. Interactively create config.json with default values
+4. Generate users.json with all followed users' IDs
+5. Display track counts for each user for reference
+
+Defaults can be accepted by pressing Enter for each prompt.
+
+# Logging
+
+Logging is now controlled by the `log_level` field in your `config.json`.
+Valid values: `trace`, `debug`, `info`, `warn`, `error` (default: `info`).
+
+Example:
+```json
+{
+  "log_level": "debug",
+  ...
+}
 ```
 
 ## How to Find SoundCloud User IDs

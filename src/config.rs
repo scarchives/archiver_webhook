@@ -36,6 +36,9 @@ pub struct Config {
     /// Maximum number of parallel user fetches
     #[serde(default = "default_max_parallel_fetches")]
     pub max_parallel_fetches: usize,
+    /// Maximum number of concurrent ffmpeg processes per user
+    #[serde(default = "default_max_concurrent_processing")]
+    pub max_concurrent_processing: usize,
     /// Whether to scrape and monitor user likes
     #[serde(default = "default_scrape_user_likes")]
     pub scrape_user_likes: bool,
@@ -47,6 +50,9 @@ pub struct Config {
     /// How often to check for new followings (in poll cycles)
     #[serde(default = "default_auto_follow_interval")]
     pub auto_follow_interval: usize,
+    /// How often to save the database (in poll cycles)
+    #[serde(default = "default_db_save_interval")]
+    pub db_save_interval: usize,
 }
 
 fn default_poll_interval() -> u64 {
@@ -84,6 +90,11 @@ fn default_max_parallel_fetches() -> usize {
     4
 }
 
+/// Default maximum concurrent ffmpeg processes per user
+fn default_max_concurrent_processing() -> usize {
+    2
+}
+
 /// Default option for scraping user likes
 fn default_scrape_user_likes() -> bool {
     false // Off by default to maintain backward compatibility
@@ -99,6 +110,11 @@ fn default_auto_follow_interval() -> usize {
     24 // Check once per day with default poll interval of 60 seconds
 }
 
+/// Default interval for saving the database (in poll cycles)
+fn default_db_save_interval() -> usize {
+    1 // Save after every poll by default
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -112,10 +128,12 @@ impl Default for Config {
             track_count_buffer: default_track_count_buffer(),
             temp_dir: None,
             max_parallel_fetches: default_max_parallel_fetches(),
+            max_concurrent_processing: default_max_concurrent_processing(),
             scrape_user_likes: default_scrape_user_likes(),
             max_likes_per_user: default_max_likes_per_user(),
             auto_follow_source: None,
             auto_follow_interval: default_auto_follow_interval(),
+            db_save_interval: default_db_save_interval(),
         }
     }
 }
@@ -188,6 +206,10 @@ impl Config {
             config.max_parallel_fetches = parallel as usize;
         }
         
+        if let Some(concurrent) = config_json.get("max_concurrent_processing").and_then(|v| v.as_u64()) {
+            config.max_concurrent_processing = concurrent as usize;
+        }
+        
         if let Some(scrape_likes) = config_json.get("scrape_user_likes").and_then(|v| v.as_bool()) {
             config.scrape_user_likes = scrape_likes;
         }
@@ -208,14 +230,19 @@ impl Config {
             config.auto_follow_interval = interval as usize;
         }
         
+        if let Some(save_interval) = config_json.get("db_save_interval").and_then(|v| v.as_u64()) {
+            config.db_save_interval = save_interval as usize;
+        }
+        
         // Validate required fields
         if config.discord_webhook_url.is_empty() {
             return Err("discord_webhook_url is required in config.json".into());
         }
         
         info!("Loaded configuration from {}", config_path);
-        debug!("Config: log_level={}, poll_interval={}s, max_tracks={}, scrape_likes={}", 
-               config.log_level, config.poll_interval_sec, config.max_tracks_per_user, config.scrape_user_likes);
+        debug!("Config: log_level={}, poll_interval={}s, max_tracks={}, scrape_likes={}, max_concurrent_processing={}",
+               config.log_level, config.poll_interval_sec, config.max_tracks_per_user, 
+               config.scrape_user_likes, config.max_concurrent_processing);
         Ok(config)
     }
 }
