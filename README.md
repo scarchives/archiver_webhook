@@ -43,7 +43,10 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
      "max_tracks_per_user": 500,
      "pagination_size": 50,
      "track_count_buffer": 5,
-     "temp_dir": null
+     "temp_dir": null,
+     "max_parallel_fetches": 4,
+     "scrape_user_likes": false,
+     "max_likes_per_user": 500
    }
    ```
 4. Create a `users.json` file with the SoundCloud user IDs to watch:
@@ -79,6 +82,9 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
 - `pagination_size` (default: 50): Number of tracks to fetch per API request (pagination size)
 - `track_count_buffer` (default: 5): Extra tracks to fetch beyond a user's reported track count
 - `temp_dir` (optional): Directory for temporary files (if not specified, system temp dir is used)
+- `max_parallel_fetches` (default: 4): Maximum number of users to process in parallel
+- `scrape_user_likes` (default: false): Whether to scrape liked tracks from users being monitored
+- `max_likes_per_user` (default: 500): Maximum number of likes to fetch for each user when `scrape_user_likes` is enabled
 
 ## Usage
 

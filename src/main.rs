@@ -356,31 +356,54 @@ async fn initialize_tracks_database() -> Result<(), Box<dyn std::error::Error + 
     // Process each user
     for user_id in &users.users {
         info!("Fetching tracks for user {}", user_id);
+        
+        // Collect all tracks from this user
+        let mut all_tracks = Vec::new();
+        
+        // Get uploaded tracks
         match soundcloud::get_user_tracks(user_id, config.max_tracks_per_user, config.pagination_size, config.track_count_buffer).await {
             Ok(tracks) => {
-                info!("Found {} tracks for user {}", tracks.len(), user_id);
-                
-                // Extract track IDs
-                let track_ids: Vec<String> = tracks.iter().map(|t| t.id.clone()).collect();
-                
-                // Add to database
-                let current_count = db.get_all_tracks().len();
-                if let Err(e) = db.initialize_with_tracks(&track_ids) {
-                    error!("Failed to initialize database with tracks: {}", e);
-                    continue;
-                }
-                let new_count = db.get_all_tracks().len();
-                
-                let added = new_count - current_count;
-                total_tracks_added += added;
-                
-                info!("Added {} new tracks for user {} to database", added, user_id);
-                total_users_processed += 1;
+                info!("Found {} uploaded tracks for user {}", tracks.len(), user_id);
+                all_tracks.extend(tracks);
             },
             Err(e) => {
                 error!("Failed to fetch tracks for user {}: {}", user_id, e);
+                continue;
             }
         }
+        
+        // If enabled, get liked tracks too
+        if config.scrape_user_likes {
+            info!("Fetching likes for user {} (enabled in config)", user_id);
+            match soundcloud::get_user_likes(user_id, config.max_likes_per_user).await {
+                Ok(likes) => {
+                    let liked_tracks = soundcloud::extract_tracks_from_likes(&likes);
+                    info!("Found {} liked tracks for user {}", liked_tracks.len(), user_id);
+                    all_tracks.extend(liked_tracks);
+                },
+                Err(e) => {
+                    warn!("Failed to fetch likes for user {}: {}", user_id, e);
+                }
+            }
+        }
+        
+        // Extract track IDs
+        let track_ids: Vec<String> = all_tracks.iter().map(|t| t.id.clone()).collect();
+        info!("Total tracks for user {}: {}", user_id, track_ids.len());
+        
+        // Add to database
+        let current_count = db.get_all_tracks().len();
+        if let Err(e) = db.initialize_with_tracks(&track_ids) {
+            error!("Failed to initialize database with tracks: {}", e);
+            continue;
+        }
+        let new_count = db.get_all_tracks().len();
+        
+        let added = new_count - current_count;
+        total_tracks_added += added;
+        
+        info!("Added {} new tracks for user {} to database", added, user_id);
+        total_users_processed += 1;
     }
     
     // Save database - this is now redundant but kept for safety
@@ -627,8 +650,32 @@ async fn poll_user(
     
     debug!("Fetched {} tracks for user {}", tracks.len(), user_id);
     
+    // If enabled, fetch user likes as well
+    let mut all_tracks = tracks.clone();
+    
+    if config.scrape_user_likes {
+        debug!("Fetching likes for user {} (enabled in config)", user_id);
+        match soundcloud::get_user_likes(user_id, config.max_likes_per_user).await {
+            Ok(likes) => {
+                info!("Fetched {} likes for user {}", likes.len(), user_id);
+                
+                // Extract tracks from likes
+                let liked_tracks = soundcloud::extract_tracks_from_likes(&likes);
+                debug!("Extracted {} tracks from user {}'s likes", liked_tracks.len(), user_id);
+                
+                // Add liked tracks to our collection
+                all_tracks.extend(liked_tracks);
+                debug!("Total tracks (uploads + likes): {}", all_tracks.len());
+            },
+            Err(e) => {
+                warn!("Failed to fetch likes for user {}: {}", user_id, e);
+                // Continue with just the user's tracks
+            }
+        }
+    }
+    
     // Check which tracks are new
-    let track_ids: Vec<String> = tracks.iter().map(|t| t.id.clone()).collect();
+    let track_ids: Vec<String> = all_tracks.iter().map(|t| t.id.clone()).collect();
     
     // Update database
     let new_track_ids = {
@@ -650,89 +697,93 @@ async fn poll_user(
     // Process new tracks (send webhook, etc.)
     let mut new_tracks_processed = 0;
     
-    for track in tracks {
-        // Check if this is a new track
-        if !new_track_ids.contains(&track.id) {
-            continue;
-        }
+    for track_id in &new_track_ids {
+        // Find the track in our collection
+        let track = all_tracks.iter().find(|t| &t.id == track_id);
         
-        // Process the track
-        info!("Processing new track: {} by {}", track.title, track.user.username);
-        
-        // Get detailed track info
-        let track_details = match soundcloud::get_track_details(&track.id).await {
-            Ok(t) => t,
-            Err(e) => {
-                error!("Failed to get details for track {}: {}", track.id, e);
-                continue;
-            }
-        };
-        
-        // Download and transcode audio
-        let processing_result = match audio::process_track_audio(&track_details, config.temp_dir.as_deref()).await {
-            Ok((mp3, ogg, artwork, json)) => {
-                let mut files = Vec::new();
-                
-                if let Some(path) = mp3 {
-                    let filename = Path::new(&path)
-                        .file_name()
-                        .unwrap_or_else(|| std::ffi::OsStr::new("track.mp3"))
-                        .to_string_lossy()
-                        .to_string();
-                    files.push((path, filename));
+        if let Some(track) = track {
+            debug!("Processing new track: {} (ID: {})", track.title, track.id);
+            
+            // Get full track details
+            let track_details = match soundcloud::get_track_details(&track.id).await {
+                Ok(t) => t,
+                Err(e) => {
+                    error!("Failed to get track details for {}: {}", track.id, e);
+                    continue;
                 }
-                
-                if let Some(path) = ogg {
-                    let filename = Path::new(&path)
-                        .file_name()
-                        .unwrap_or_else(|| std::ffi::OsStr::new("track.ogg"))
-                        .to_string_lossy()
-                        .to_string();
-                    files.push((path, filename));
+            };
+            
+            // Process audio files if possible
+            let processing_result = match audio::process_track_audio(&track_details, config.temp_dir.as_deref()).await {
+                Ok((mp3, ogg, artwork, json)) => {
+                    debug!("Successfully processed audio for track {}", track.id);
+                    
+                    // Collect files to attach to the Discord message
+                    let mut files = Vec::new();
+                    
+                    // Add MP3 if available
+                    if let Some(path) = mp3 {
+                        let filename = Path::new(&path)
+                            .file_name()
+                            .unwrap_or_else(|| std::ffi::OsStr::new("track.mp3"))
+                            .to_string_lossy()
+                            .to_string();
+                        files.push((path, filename));
+                    }
+                    
+                    // Add OGG if available
+                    if let Some(path) = ogg {
+                        let filename = Path::new(&path)
+                            .file_name()
+                            .unwrap_or_else(|| std::ffi::OsStr::new("track.ogg"))
+                            .to_string_lossy()
+                            .to_string();
+                        files.push((path, filename));
+                    }
+                    
+                    if let Some(path) = artwork {
+                        let filename = Path::new(&path)
+                            .file_name()
+                            .unwrap_or_else(|| std::ffi::OsStr::new("cover.jpg"))
+                            .to_string_lossy()
+                            .to_string();
+                        files.push((path, filename));
+                    }
+                    
+                    if let Some(path) = json {
+                        let filename = Path::new(&path)
+                            .file_name()
+                            .unwrap_or_else(|| std::ffi::OsStr::new("data.json"))
+                            .to_string_lossy()
+                            .to_string();
+                        files.push((path, filename));
+                    }
+                    
+                    files
+                },
+                Err(e) => {
+                    error!("Failed to process audio for track {}: {}", track.id, e);
+                    Vec::new()
                 }
-                
-                if let Some(path) = artwork {
-                    let filename = Path::new(&path)
-                        .file_name()
-                        .unwrap_or_else(|| std::ffi::OsStr::new("cover.jpg"))
-                        .to_string_lossy()
-                        .to_string();
-                    files.push((path, filename));
+            };
+            
+            // Send to Discord
+            match discord::send_track_webhook(&config.discord_webhook_url, &track_details, Some(processing_result.clone())).await {
+                Ok(_) => {
+                    info!("Successfully sent webhook for track: {} by {}", 
+                          track_details.title, track_details.user.username);
+                    new_tracks_processed += 1;
                 }
-                
-                if let Some(path) = json {
-                    let filename = Path::new(&path)
-                        .file_name()
-                        .unwrap_or_else(|| std::ffi::OsStr::new("data.json"))
-                        .to_string_lossy()
-                        .to_string();
-                    files.push((path, filename));
+                Err(e) => {
+                    error!("Failed to send webhook for track {}: {}", track.id, e);
                 }
-                
-                files
-            },
-            Err(e) => {
-                error!("Failed to process audio for track {}: {}", track.id, e);
-                Vec::new()
             }
-        };
-        
-        // Send to Discord
-        match discord::send_track_webhook(&config.discord_webhook_url, &track_details, Some(processing_result.clone())).await {
-            Ok(_) => {
-                info!("Successfully sent webhook for track: {} by {}", 
-                      track_details.title, track_details.user.username);
-                new_tracks_processed += 1;
-            }
-            Err(e) => {
-                error!("Failed to send webhook for track {}: {}", track.id, e);
-            }
-        }
-        
-        // Clean up temp files
-        for (path, _) in processing_result {
-            if let Err(e) = audio::delete_temp_file(&path).await {
-                warn!("Failed to clean up temp file {}: {}", path, e);
+            
+            // Clean up temp files
+            for (path, _) in processing_result {
+                if let Err(e) = audio::delete_temp_file(&path).await {
+                    warn!("Failed to clean up temp file {}: {}", path, e);
+                }
             }
         }
     }
@@ -1056,6 +1107,16 @@ async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error + Se
         .parse::<usize>()
         .unwrap_or(4);
     
+    println!("\nScrape user likes? (true/false) [false]: ");
+    let scrape_user_likes = read_line_with_default("false")
+        .parse::<bool>()
+        .unwrap_or(false);
+    
+    println!("\nMaximum likes to fetch per user [500]: ");
+    let max_likes_per_user = read_line_with_default("500")
+        .parse::<usize>()
+        .unwrap_or(500);
+    
     // Create the config
     let config = Config {
         discord_webhook_url,
@@ -1068,6 +1129,8 @@ async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error + Se
         track_count_buffer,
         temp_dir,
         max_parallel_fetches,
+        scrape_user_likes,
+        max_likes_per_user,
     };
     
     // Create the users
