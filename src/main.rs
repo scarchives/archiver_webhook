@@ -785,7 +785,6 @@ async fn poll_user(
         };
         
         let semaphore_clone = processing_semaphore.clone();
-        let config_clone = config.clone();
         let webhook_url = config.discord_webhook_url.clone();
         let temp_dir = config.temp_dir.clone();
         
