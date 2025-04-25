@@ -154,7 +154,7 @@ async fn resolve_soundcloud_url(url: &str) -> Result<(), Box<dyn std::error::Err
     // Load config to get log level
     let config_path = "config.json";
     debug!("Loading configuration from {}", config_path);
-    let config = match Config::load(config_path) {
+    match Config::load(config_path) {
         Ok(c) => {
             debug!("Configuration loaded successfully");
             debug!("Log level: {}", c.log_level);

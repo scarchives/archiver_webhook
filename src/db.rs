@@ -1,8 +1,8 @@
 use std::collections::HashSet;
-use std::fs::File;
+use std::fs::{File, copy, remove_file};
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
-use log::{info, debug, trace, error};
+use log::{info, debug, trace, error, warn};
 use serde::{Deserialize, Serialize};
 
 /// Simple database to store known track IDs
@@ -51,39 +51,56 @@ impl TrackDatabase {
     
     /// Save database to file
     /// 
-    /// Uses an atomic write pattern with a temporary file to prevent data corruption
+    /// Uses a safe file writing pattern to prevent data corruption
     /// in case of application crash or power loss during the save operation.
     pub fn save(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         debug!("Saving tracks database to {}", self.db_path);
         
-        // Create temporary file name by appending .tmp extension
-        let temp_path = format!("{}.tmp", self.db_path);
+        // Instead of creating a temp file and renaming it, we'll use a safer approach
+        // that works better across platforms
         
-        // Write to temporary file first
-        let file = match File::create(&temp_path) {
+        // First, create a backup of the existing file if it exists
+        let backup_path = format!("{}.bak", self.db_path);
+        if Path::new(&self.db_path).exists() {
+            debug!("Creating backup of existing database file");
+            match copy(&self.db_path, &backup_path) {
+                Ok(_) => debug!("Created backup at {}", backup_path),
+                Err(e) => warn!("Failed to create backup file {}: {}", backup_path, e),
+            }
+        }
+        
+        // Write directly to target file
+        let file = match File::create(&self.db_path) {
             Ok(f) => f,
             Err(e) => {
-                error!("Failed to create temporary database file {}: {}", temp_path, e);
+                error!("Failed to create database file {}: {}", self.db_path, e);
                 return Err(e.into());
             }
         };
         
         let writer = BufWriter::new(file);
         
-        // Serialize to temporary file
+        // Serialize to the file
         if let Err(e) = serde_json::to_writer_pretty(writer, self) {
-            error!("Failed to write database to temporary file: {}", e);
-            // Try to clean up the temporary file
-            let _ = std::fs::remove_file(&temp_path);
+            error!("Failed to write database to file: {}", e);
+            
+            // Try to restore from backup if it exists
+            if Path::new(&backup_path).exists() {
+                match copy(&backup_path, &self.db_path) {
+                    Ok(_) => debug!("Restored from backup after write failure"),
+                    Err(e2) => error!("Failed to restore from backup: {}", e2),
+                }
+            }
+            
             return Err(e.into());
         }
         
-        // Rename temporary file to actual file (atomic operation on most filesystems)
-        if let Err(e) = std::fs::rename(&temp_path, &self.db_path) {
-            error!("Failed to rename temporary database file to target path: {}", e);
-            // Try to clean up the temporary file
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(e.into());
+        // Remove the backup file now that we've successfully written the new file
+        if Path::new(&backup_path).exists() {
+            if let Err(e) = remove_file(&backup_path) {
+                // This is not a critical error, just log a warning
+                warn!("Failed to remove backup file {}: {}", backup_path, e);
+            }
         }
         
         let track_count = self.tracks.len();

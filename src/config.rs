@@ -4,6 +4,7 @@ use std::io::{BufReader, BufWriter};
 use std::path::Path;
 use log::{info, warn, debug, error};
 use serde_json::Value;
+use std::fs;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -241,34 +242,48 @@ impl Users {
     pub fn save(&self, path: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         debug!("Saving {} users to file: {}", self.users.len(), path);
         
-        // Create a temporary file path
-        let temp_path = format!("{}.tmp", path);
+        // First, create a backup of the existing file if it exists
+        let backup_path = format!("{}.bak", path);
+        if Path::new(path).exists() {
+            debug!("Creating backup of existing users file");
+            match fs::copy(path, &backup_path) {
+                Ok(_) => debug!("Created backup at {}", backup_path),
+                Err(e) => warn!("Failed to create backup file {}: {}", backup_path, e),
+            }
+        }
         
-        // Write to temporary file first
-        let file = match File::create(&temp_path) {
+        // Write directly to target file
+        let file = match File::create(path) {
             Ok(f) => f,
             Err(e) => {
-                error!("Failed to create temporary users file {}: {}", temp_path, e);
+                error!("Failed to create users file {}: {}", path, e);
                 return Err(e.into());
             }
         };
         
         let writer = BufWriter::new(file);
         
-        // Serialize to temporary file
+        // Serialize to the file
         if let Err(e) = serde_json::to_writer_pretty(writer, self) {
-            error!("Failed to write users to temporary file: {}", e);
-            // Try to clean up the temporary file
-            let _ = std::fs::remove_file(&temp_path);
+            error!("Failed to write users to file: {}", e);
+            
+            // Try to restore from backup if it exists
+            if Path::new(&backup_path).exists() {
+                match fs::copy(&backup_path, path) {
+                    Ok(_) => debug!("Restored from backup after write failure"),
+                    Err(e2) => error!("Failed to restore from backup: {}", e2),
+                }
+            }
+            
             return Err(e.into());
         }
         
-        // Rename temporary file to actual file (atomic operation on most filesystems)
-        if let Err(e) = std::fs::rename(&temp_path, path) {
-            error!("Failed to rename temporary users file to target path: {}", e);
-            // Try to clean up the temporary file
-            let _ = std::fs::remove_file(&temp_path);
-            return Err(e.into());
+        // Remove the backup file now that we've successfully written the new file
+        if Path::new(&backup_path).exists() {
+            if let Err(e) = fs::remove_file(&backup_path) {
+                // This is not a critical error, just log a warning
+                warn!("Failed to remove backup file {}: {}", backup_path, e);
+            }
         }
         
         info!("Successfully saved {} users to {}", self.users.len(), path);
