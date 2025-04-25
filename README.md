@@ -12,6 +12,8 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
 - Simple tracks database for persistent state tracking
 - Configurable polling interval
 - Automatic client ID regeneration
+- Optional scraping of users' liked tracks
+- Auto-follow mode to automatically add new followings from a source user
 
 ## Requirements
 
@@ -46,7 +48,9 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
      "temp_dir": null,
      "max_parallel_fetches": 4,
      "scrape_user_likes": false,
-     "max_likes_per_user": 500
+     "max_likes_per_user": 500,
+     "auto_follow_source": null,
+     "auto_follow_interval": 24
    }
    ```
 4. Create a `users.json` file with the SoundCloud user IDs to watch:
@@ -85,6 +89,8 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
 - `max_parallel_fetches` (default: 4): Maximum number of users to process in parallel
 - `scrape_user_likes` (default: false): Whether to scrape liked tracks from users being monitored
 - `max_likes_per_user` (default: 500): Maximum number of likes to fetch for each user when `scrape_user_likes` is enabled
+- `auto_follow_source` (optional): User ID or URL whose followings you want to automatically add to your watched users
+- `auto_follow_interval` (default: 24): How often to check for new followings (in poll cycles). Checking is also performed once immediately on startup.
 
 ## Usage
 

@@ -446,7 +446,7 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
 
     // Load users
     info!("Loading users from {}", config.users_file);
-    let users = match Users::load(&config.users_file) {
+    let mut users = match Users::load(&config.users_file) {
         Ok(u) => {
             info!("Loaded {} users", u.users.len());
             u
@@ -488,6 +488,23 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
         }
     }
     
+    // If auto-follow is enabled, check for new followings on startup
+    if config.auto_follow_source.is_some() {
+        info!("Auto-follow is enabled, checking for new followings on startup");
+        match update_followings_from_source(&config, &mut users).await {
+            Ok(count) => {
+                if count > 0 {
+                    info!("Added {} new users to watch from auto-follow source during startup", count);
+                } else {
+                    info!("No new followings found from auto-follow source during startup");
+                }
+            },
+            Err(e) => {
+                warn!("Failed to update followings from source during startup: {}", e);
+            }
+        }
+    }
+    
     // Initialize signal handlers for clean shutdown
     #[cfg(unix)]
     let mut sigint = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
@@ -507,6 +524,9 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
     let mut total_polls = 0;
     let total_new_tracks_overall = 0;
     let mut last_stats_time = std::time::Instant::now();
+    
+    // Counter for auto follow checking
+    let mut follow_check_counter = 0;
     
     // Main loop with graceful shutdown support
     loop {
@@ -559,6 +579,32 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
         }
         
         debug!("Poll #{}: Checking for new tracks", total_polls);
+        
+        // Check if it's time to update followings
+        if config.auto_follow_source.is_some() {
+            follow_check_counter += 1;
+            
+            if follow_check_counter >= config.auto_follow_interval {
+                info!("Auto-follow interval reached ({} polls), checking for new followings", 
+                      config.auto_follow_interval);
+                
+                match update_followings_from_source(&config, &mut users).await {
+                    Ok(count) => {
+                        if count > 0 {
+                            info!("Added {} new users to watch from auto-follow source", count);
+                        } else {
+                            debug!("No new followings found from auto-follow source");
+                        }
+                    },
+                    Err(e) => {
+                        warn!("Failed to update followings from source: {}", e);
+                    }
+                }
+                
+                // Reset counter
+                follow_check_counter = 0;
+            }
+        }
         
         // Process users in parallel batches
         let users_vec = users.users.clone();
@@ -1117,6 +1163,19 @@ async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error + Se
         .parse::<usize>()
         .unwrap_or(500);
     
+    println!("\nAdd a user ID or URL to auto-follow their followings? (leave empty to disable): ");
+    let auto_follow_input = read_line_with_default("");
+    let auto_follow_source = if auto_follow_input.trim().is_empty() {
+        None
+    } else {
+        Some(auto_follow_input)
+    };
+    
+    println!("\nHow often to check for new followings (in poll cycles) [24]: ");
+    let auto_follow_interval = read_line_with_default("24")
+        .parse::<usize>()
+        .unwrap_or(24);
+    
     // Create the config
     let config = Config {
         discord_webhook_url,
@@ -1131,6 +1190,8 @@ async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error + Se
         max_parallel_fetches,
         scrape_user_likes,
         max_likes_per_user,
+        auto_follow_source,
+        auto_follow_interval,
     };
     
     // Create the users
@@ -1185,4 +1246,132 @@ fn read_line_with_default(default: &str) -> String {
     } else {
         default.to_string()
     }
+}
+
+/// Check for new followings from a source user and add them to the watched users list
+///
+/// This function is used by the auto-follow feature, which automatically adds new users followed
+/// by a source user to the watch list. It's called both on startup and periodically during the
+/// application's run time according to the configured interval.
+///
+/// The function:
+/// 1. Resolves the source URL to a user ID if needed
+/// 2. Fetches all of the source user's followings
+/// 3. Compares with existing users to find new followings
+/// 4. Adds new followings to the watch list
+/// 5. Saves the updated users file
+///
+/// If a user is unfollowed by the source, they remain in the users list.
+async fn update_followings_from_source(
+    config: &Config,
+    users: &mut Users,
+) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+    // Return early if no auto-follow source is configured
+    let source = match &config.auto_follow_source {
+        Some(s) => s,
+        None => {
+            debug!("No auto-follow source configured, skipping followings update");
+            return Ok(0);
+        }
+    };
+    
+    info!("Checking for new users followed by source: {}", source);
+    
+    // Initialize SoundCloud client if not already done
+    if soundcloud::get_client_id().is_none() {
+        info!("Initializing SoundCloud client");
+        match soundcloud::initialize().await {
+            Ok(_) => info!("SoundCloud client initialized successfully"),
+            Err(e) => {
+                error!("Failed to initialize SoundCloud client: {}", e);
+                return Err(e);
+            }
+        }
+    }
+    
+    // Determine if the source is an ID or URL
+    let user_id = if source.contains("soundcloud.com") || source.contains("http") {
+        // It's a URL, resolve it
+        info!("Resolving URL to user ID: {}", source);
+        match soundcloud::resolve_url(source).await {
+            Ok(data) => {
+                if let Some(kind) = data.get("kind").and_then(|v| v.as_str()) {
+                    if kind == "user" {
+                        match data.get("id").and_then(|v| v.as_u64()) {
+                            Some(id) => id.to_string(),
+                            None => {
+                                error!("Could not extract user ID from resolved URL data");
+                                return Err("Missing user ID in resolved data".into());
+                            }
+                        }
+                    } else {
+                        error!("URL resolved to non-user kind: {}", kind);
+                        return Err(format!("URL resolved to non-user kind: {}", kind).into());
+                    }
+                } else {
+                    error!("URL resolved to object with missing kind");
+                    return Err("URL resolved to object with missing kind".into());
+                }
+            },
+            Err(e) => {
+                error!("Failed to resolve URL {}: {}", source, e);
+                return Err(e);
+            }
+        }
+    } else {
+        // It's already an ID
+        source.clone()
+    };
+    
+    // Fetch the user's followings
+    info!("Fetching followings for user ID: {}", user_id);
+    let followings = match soundcloud::get_user_followings(&user_id, None).await {
+        Ok(f) => f,
+        Err(e) => {
+            error!("Failed to fetch followings: {}", e);
+            return Err(e);
+        }
+    };
+    
+    info!("Found {} followings for source user", followings.len());
+    
+    // Extract user IDs from followings
+    let following_ids: Vec<String> = followings.iter()
+        .filter_map(|f| f.get("id").and_then(|v| v.as_u64()).map(|id| id.to_string()))
+        .collect();
+    
+    // Find new followings not already in users list
+    let new_followings: Vec<String> = following_ids.iter()
+        .filter(|id| !users.users.contains(id))
+        .cloned()
+        .collect();
+    
+    let count = new_followings.len();
+    
+    if count > 0 {
+        info!("Adding {} new followings to users list", count);
+        for id in &new_followings {
+            // Extract username if available for logging
+            let username = followings.iter()
+                .find(|u| u.get("id").and_then(|v| v.as_u64()).map(|i| i.to_string()) == Some(id.clone()))
+                .and_then(|u| u.get("username").and_then(|v| v.as_str()))
+                .unwrap_or("Unknown");
+            
+            info!("Adding new user to watch: {} ({})", username, id);
+            users.users.push(id.clone());
+        }
+        
+        // Save updated users file
+        match users.save(&config.users_file) {
+            Ok(_) => info!("Successfully saved {} new users to {}", count, config.users_file),
+            Err(e) => {
+                error!("Failed to save updated users file: {}", e);
+                return Err(e);
+            }
+        }
+    } else {
+        debug!("No new followings found for user {}", user_id);
+    }
+    
+    Ok(count)
 }

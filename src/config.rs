@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, BufWriter};
 use std::path::Path;
-use log::{info, warn, debug};
+use log::{info, warn, debug, error};
 use serde_json::Value;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -41,6 +41,11 @@ pub struct Config {
     /// Maximum number of likes to fetch per user
     #[serde(default = "default_max_likes_per_user")]
     pub max_likes_per_user: usize,
+    /// User ID or URL to monitor for new followings to add
+    pub auto_follow_source: Option<String>,
+    /// How often to check for new followings (in poll cycles)
+    #[serde(default = "default_auto_follow_interval")]
+    pub auto_follow_interval: usize,
 }
 
 fn default_poll_interval() -> u64 {
@@ -88,6 +93,11 @@ fn default_max_likes_per_user() -> usize {
     500 // Default to 500 likes per user (increased from 50)
 }
 
+/// Default interval for checking new follows (in poll cycles)
+fn default_auto_follow_interval() -> usize {
+    24 // Check once per day with default poll interval of 60 seconds
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -103,6 +113,8 @@ impl Default for Config {
             max_parallel_fetches: default_max_parallel_fetches(),
             scrape_user_likes: default_scrape_user_likes(),
             max_likes_per_user: default_max_likes_per_user(),
+            auto_follow_source: None,
+            auto_follow_interval: default_auto_follow_interval(),
         }
     }
 }
@@ -183,6 +195,18 @@ impl Config {
             config.max_likes_per_user = max_likes as usize;
         }
         
+        if let Some(auto_follow) = config_json.get("auto_follow_source") {
+            if auto_follow.is_null() {
+                config.auto_follow_source = None;
+            } else if let Some(source) = auto_follow.as_str() {
+                config.auto_follow_source = Some(source.to_string());
+            }
+        }
+        
+        if let Some(interval) = config_json.get("auto_follow_interval").and_then(|v| v.as_u64()) {
+            config.auto_follow_interval = interval as usize;
+        }
+        
         // Validate required fields
         if config.discord_webhook_url.is_empty() {
             return Err("discord_webhook_url is required in config.json".into());
@@ -211,5 +235,43 @@ impl Users {
         
         info!("Loaded {} users from {}", users.users.len(), path);
         Ok(users)
+    }
+
+    /// Save users list to a file
+    pub fn save(&self, path: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+        debug!("Saving {} users to file: {}", self.users.len(), path);
+        
+        // Create a temporary file path
+        let temp_path = format!("{}.tmp", path);
+        
+        // Write to temporary file first
+        let file = match File::create(&temp_path) {
+            Ok(f) => f,
+            Err(e) => {
+                error!("Failed to create temporary users file {}: {}", temp_path, e);
+                return Err(e.into());
+            }
+        };
+        
+        let writer = BufWriter::new(file);
+        
+        // Serialize to temporary file
+        if let Err(e) = serde_json::to_writer_pretty(writer, self) {
+            error!("Failed to write users to temporary file: {}", e);
+            // Try to clean up the temporary file
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e.into());
+        }
+        
+        // Rename temporary file to actual file (atomic operation on most filesystems)
+        if let Err(e) = std::fs::rename(&temp_path, path) {
+            error!("Failed to rename temporary users file to target path: {}", e);
+            // Try to clean up the temporary file
+            let _ = std::fs::remove_file(&temp_path);
+            return Err(e.into());
+        }
+        
+        info!("Successfully saved {} users to {}", self.users.len(), path);
+        Ok(())
     }
 } 
