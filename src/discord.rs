@@ -56,7 +56,17 @@ fn build_track_embed(track: &Track) -> Value {
     debug!("Building Discord embed for track '{}' (ID: {})", track.title, track.id);
     
     // Extract additional metadata from raw_data if available
-    let description = track.description.clone().unwrap_or_default();
+    let mut description = track.description.clone().unwrap_or_default();
+    
+    // Trim description to 2000 characters to avoid Discord payload size limits
+    const MAX_DESCRIPTION_LENGTH: usize = 2000;
+    if description.len() > MAX_DESCRIPTION_LENGTH {
+        warn!("Track description for '{}' exceeded Discord limit ({} chars), trimming to {} chars",
+            track.title, description.len(), MAX_DESCRIPTION_LENGTH);
+        description.truncate(MAX_DESCRIPTION_LENGTH);
+        // Add ellipsis to indicate truncation
+        description.push_str("...");
+    }
     
     // These values will be populated from either raw_data or track struct directly
     let play_count: Option<u64>;
