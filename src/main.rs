@@ -813,11 +813,11 @@ async fn poll_user(
             // Download and process audio
             info!("Processing audio and artwork for track");
             let processing_result = match audio::process_track_audio(&track_details, temp_dir.as_deref()).await {
-                Ok((primary_audio, secondary_audio, artwork, json)) => {
-                    let mut files = Vec::new();
+                Ok((audio_files, artwork, json)) => {
+                    let mut files_for_discord = Vec::new();
                     
-                    // Process primary audio file (could be any format)
-                    if let Some(path) = primary_audio {
+                    // Process all audio files
+                    for (format_info, path) in &audio_files {
                         let file_path = path.clone();
                         let filename = Path::new(&file_path)
                             .file_name()
@@ -825,23 +825,11 @@ async fn poll_user(
                             .to_string_lossy()
                             .to_string();
                         
-                        info!("Primary audio file: {}", filename);
-                        files.push((file_path, filename));
+                        info!("Audio file ({}): {}", format_info, filename);
+                        files_for_discord.push((file_path, filename));
                     }
                     
-                    // Process secondary audio file if available
-                    if let Some(path) = secondary_audio {
-                        let file_path = path.clone();
-                        let filename = Path::new(&file_path)
-                            .file_name()
-                            .unwrap_or_else(|| std::ffi::OsStr::new("track.audio"))
-                            .to_string_lossy()
-                            .to_string();
-                        
-                        info!("Secondary audio file: {}", filename);
-                        files.push((file_path, filename));
-                    }
-                    
+                    // Add artwork if available
                     if let Some(path) = artwork {
                         let file_path = path.clone();
                         let filename = Path::new(&file_path)
@@ -851,9 +839,10 @@ async fn poll_user(
                             .to_string();
                         
                         info!("Downloaded artwork: {}", filename);
-                        files.push((file_path, filename));
+                        files_for_discord.push((file_path, filename));
                     }
                     
+                    // Add JSON metadata if available
                     if let Some(path) = json {
                         let file_path = path.clone();
                         let filename = Path::new(&file_path)
@@ -863,10 +852,10 @@ async fn poll_user(
                             .to_string();
                         
                         info!("Saved JSON metadata: {}", filename);
-                        files.push((file_path, filename));
+                        files_for_discord.push((file_path, filename));
                     }
                     
-                    files
+                    files_for_discord
                 },
                 Err(e) => {
                     error!("Failed to process audio for track {}: {}", track.id, e);
@@ -886,7 +875,7 @@ async fn poll_user(
             }
             
             // Clean up temp files
-            for (path, _) in processing_result {
+            for (path, _) in processing_result.clone() {
                 if let Err(e) = audio::delete_temp_file(&path).await {
                     warn!("Failed to clean up temp file {}: {}", path, e);
                 }
@@ -999,11 +988,11 @@ async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error::Er
     // Download and process audio
     info!("Processing audio and artwork for track");
     let processing_result = match audio::process_track_audio(&track_details, config.temp_dir.as_deref()).await {
-        Ok((primary_audio, secondary_audio, artwork, json)) => {
+        Ok((audio_files, artwork, json)) => {
             let mut files = Vec::new();
             
-            // Process primary audio file (could be any format)
-            if let Some(path) = primary_audio {
+            // Process all audio files
+            for (format_info, path) in &audio_files {
                 let file_path = path.clone();
                 let filename = Path::new(&file_path)
                     .file_name()
@@ -1011,20 +1000,7 @@ async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error::Er
                     .to_string_lossy()
                     .to_string();
                 
-                info!("Primary audio file: {}", filename);
-                files.push((file_path, filename));
-            }
-            
-            // Process secondary audio file if available
-            if let Some(path) = secondary_audio {
-                let file_path = path.clone();
-                let filename = Path::new(&file_path)
-                    .file_name()
-                    .unwrap_or_else(|| std::ffi::OsStr::new("track.audio"))
-                    .to_string_lossy()
-                    .to_string();
-                
-                info!("Secondary audio file: {}", filename);
+                info!("Audio file ({}): {}", format_info, filename);
                 files.push((file_path, filename));
             }
             
@@ -1075,7 +1051,7 @@ async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error::Er
     }
     
     // Clean up temp files
-    for (path, _) in processing_result {
+    for (path, _) in processing_result.clone() {
         if let Err(e) = audio::delete_temp_file(&path).await {
             warn!("Failed to clean up temp file {}: {}", path, e);
         }

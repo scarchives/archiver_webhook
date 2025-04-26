@@ -111,6 +111,18 @@ fn build_track_embed(track: &Track) -> Value {
     // Build fields for the embed
     let mut fields = vec![];
     
+    // Add duration if available
+    if track.duration > 0 {
+        let duration_secs = track.duration / 1000;
+        let minutes = duration_secs / 60;
+        let seconds = duration_secs % 60;
+        fields.push(json!({
+            "name": "Duration",
+            "value": format!("{}:{:02}", minutes, seconds),
+            "inline": true
+        }));
+    }
+    
     // Add genre if available
     if let Some(g) = genre {
         if !g.is_empty() {
@@ -159,7 +171,10 @@ fn build_track_embed(track: &Track) -> Value {
         "thumbnail": {
             "url": artwork_url
         },
-        "fields": fields
+        "fields": fields,
+        "footer": {
+            "text": "SoundCloud Archiver • All available audio formats are attached"
+        }
     })
 }
 
@@ -261,6 +276,60 @@ async fn send_with_audio_files(
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Preparing multipart request with {} audio files", files.len());
     
+    // Discord limits: 
+    // - Max 8MB for regular uploads 
+    // - Max 10 attachments per message
+    const MAX_DISCORD_UPLOAD_SIZE: u64 = 8 * 1024 * 1024; // 8MB
+    const MAX_ATTACHMENTS: usize = 10;
+    
+    // Filter files to respect Discord limits
+    let mut filtered_files = Vec::new();
+    let mut total_size: u64 = 0;
+    let mut file_count = 0;
+    
+    // First pass: get all files and their sizes
+    let mut file_sizes = Vec::new();
+    for (file_path, file_name) in files {
+        let path = Path::new(&file_path);
+        let file_size = match fs::metadata(path) {
+            Ok(metadata) => metadata.len(),
+            Err(e) => {
+                warn!("Failed to get file size for {}: {}", file_path, e);
+                0
+            }
+        };
+        file_sizes.push((file_path, file_name, file_size));
+    }
+    
+    // Sort files by size (smallest first) to maximize number of files we can include
+    file_sizes.sort_by(|a, b| a.2.cmp(&b.2));
+    
+    // Add files until we hit limits
+    let file_sizes_len = file_sizes.len();
+    for (file_path, file_name, file_size) in file_sizes {
+        // Check if we would exceed limits by adding this file
+        if file_count >= MAX_ATTACHMENTS {
+            warn!("Reached Discord attachment limit of {} files", MAX_ATTACHMENTS);
+            break;
+        }
+        
+        if total_size + file_size > MAX_DISCORD_UPLOAD_SIZE {
+            warn!("File {} would exceed Discord size limit ({} + {} > {})", 
+                 file_name, total_size, file_size, MAX_DISCORD_UPLOAD_SIZE);
+            continue;
+        }
+        
+        // Add the file
+        filtered_files.push((file_path, file_name));
+        total_size += file_size;
+        file_count += 1;
+    }
+    
+    if filtered_files.len() < file_sizes_len {
+        warn!("Some files were excluded due to Discord limits: {} of {} files included ({} bytes total)",
+             filtered_files.len(), file_sizes_len, total_size);
+    }
+    
     // Create a multipart form
     let mut form = multipart::Form::new()
         .text("payload_json", json!({
@@ -269,9 +338,9 @@ async fn send_with_audio_files(
         }).to_string());
     
     // Add each audio file
-    for (i, (file_path, file_name)) in files.iter().enumerate() {
+    for (i, (file_path, file_name)) in filtered_files.iter().enumerate() {
         // Read the file
-        debug!("Adding file {}/{} to multipart form: {}", i+1, files.len(), file_name);
+        debug!("Adding file {}/{} to multipart form: {}", i+1, filtered_files.len(), file_name);
         
         let path = Path::new(file_path);
         let file_size = match fs::metadata(path) {
@@ -308,6 +377,9 @@ async fn send_with_audio_files(
             Some(ext) if ext == "ogg" => "audio/ogg",
             Some(ext) if ext == "opus" => "audio/opus",
             Some(ext) if ext == "m4a" => "audio/mp4",
+            Some(ext) if ext == "json" => "application/json",
+            Some(ext) if ext == "jpg" || ext == "jpeg" => "image/jpeg",
+            Some(ext) if ext == "png" => "image/png",
             Some(ext) => {
                 let ext_str = ext.to_string_lossy();
                 debug!("Unknown extension '{}', using default MIME type", ext_str);

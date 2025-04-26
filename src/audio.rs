@@ -12,15 +12,14 @@ use lazy_static;
 use serde_json::Value;
 
 /// Download and preserve original audio from a SoundCloud track
-/// Returns paths to the downloaded files:
-/// - First value: Original stream file (or transcoded MP3 if necessary as fallback)
-/// - Second value: Secondary format (like OGG/Opus) if available
-/// - Third value: Artwork file
-/// - Fourth value: JSON metadata file
+/// Returns a tuple containing:
+/// - Vec of (format_info, file_path) for all downloaded audio files
+/// - Option<String> for artwork file path
+/// - Option<String> for JSON metadata file path
 pub async fn process_track_audio(
     track: &Track,
     temp_dir: Option<&str>
-) -> Result<(Option<String>, Option<String>, Option<String>, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(Vec<(String, String)>, Option<String>, Option<String>), Box<dyn std::error::Error + Send + Sync>> {
     // Get the base temp directory
     let base_dir = match temp_dir {
         Some(dir) => {
@@ -304,14 +303,11 @@ pub async fn process_track_audio(
         priority_a.cmp(&priority_b)
     });
     
-    // Return the primary and secondary files if available
-    let primary_file = downloaded_files.get(0).map(|(_, path)| path.clone());
-    let secondary_file = downloaded_files.get(1).map(|(_, path)| path.clone());
-    
+    // Return all downloaded files instead of just primary/secondary
     info!("Processing completed for track '{}' (ID: {})", track.title, track.id);
-    debug!("Primary file: {:?}, Secondary file: {:?}", primary_file, secondary_file);
+    debug!("Downloaded {} audio files", downloaded_files.len());
     
-    Ok((primary_file, secondary_file, artwork_result, json_result))
+    Ok((downloaded_files, artwork_result, json_result))
 }
 
 /// Extract all available streaming formats from track data
