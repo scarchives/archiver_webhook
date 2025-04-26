@@ -5,6 +5,7 @@ use std::path::Path;
 use log::{info, warn, debug, error};
 use serde_json::Value;
 use std::fs;
+use lazy_static;
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
 pub struct Config {
@@ -53,6 +54,12 @@ pub struct Config {
     /// How often to save the database (in poll cycles)
     #[serde(default = "default_db_save_interval")]
     pub db_save_interval: usize,
+    /// Whether to show ffmpeg output in console
+    #[serde(default = "default_show_ffmpeg_output")]
+    pub show_ffmpeg_output: bool,
+    /// Path to log file (defaults to latest.log)
+    #[serde(default = "default_log_file")]
+    pub log_file: String,
 }
 
 fn default_poll_interval() -> u64 {
@@ -115,6 +122,16 @@ fn default_db_save_interval() -> usize {
     1 // Save after every poll by default
 }
 
+/// Default setting for showing ffmpeg output
+fn default_show_ffmpeg_output() -> bool {
+    false // Off by default to reduce console clutter
+}
+
+/// Default log file path
+fn default_log_file() -> String {
+    "latest.log".to_string()
+}
+
 impl Default for Config {
     fn default() -> Self {
         Config {
@@ -134,6 +151,8 @@ impl Default for Config {
             auto_follow_source: None,
             auto_follow_interval: default_auto_follow_interval(),
             db_save_interval: default_db_save_interval(),
+            show_ffmpeg_output: default_show_ffmpeg_output(),
+            log_file: default_log_file(),
         }
     }
 }
@@ -234,6 +253,14 @@ impl Config {
             config.db_save_interval = save_interval as usize;
         }
         
+        if let Some(show_ffmpeg) = config_json.get("show_ffmpeg_output").and_then(|v| v.as_bool()) {
+            config.show_ffmpeg_output = show_ffmpeg;
+        }
+        
+        if let Some(log_file) = config_json.get("log_file").and_then(|v| v.as_str()) {
+            config.log_file = log_file.to_string();
+        }
+        
         // Validate required fields
         if config.discord_webhook_url.is_empty() {
             return Err("discord_webhook_url is required in config.json".into());
@@ -244,6 +271,27 @@ impl Config {
                config.log_level, config.poll_interval_sec, config.max_tracks_per_user, 
                config.scrape_user_likes, config.max_concurrent_processing);
         Ok(config)
+    }
+    
+    /// Static access to show_ffmpeg_output setting
+    /// Used in audio.rs to check if ffmpeg output should be shown
+    pub fn show_ffmpeg_output() -> Option<bool> {
+        lazy_static::lazy_static! {
+            static ref CONFIG_VALUE: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+        }
+        
+        let lock = CONFIG_VALUE.lock().unwrap();
+        *lock
+    }
+    
+    /// Set the value for the static show_ffmpeg_output access
+    pub fn set_show_ffmpeg_output(value: bool) {
+        lazy_static::lazy_static! {
+            static ref CONFIG_VALUE: std::sync::Mutex<Option<bool>> = std::sync::Mutex::new(None);
+        }
+        
+        let mut lock = CONFIG_VALUE.lock().unwrap();
+        *lock = Some(value);
     }
 }
 

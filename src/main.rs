@@ -810,50 +810,60 @@ async fn poll_user(
                 }
             };
             
-            // Process audio files if possible
+            // Download and process audio
+            info!("Processing audio and artwork for track");
             let processing_result = match audio::process_track_audio(&track_details, temp_dir.as_deref()).await {
-                Ok((mp3, ogg, artwork, json)) => {
-                    debug!("Successfully processed audio for track {}", track.id);
-                    
-                    // Collect files to attach to the Discord message
+                Ok((primary_audio, secondary_audio, artwork, json)) => {
                     let mut files = Vec::new();
                     
-                    // Add MP3 if available
-                    if let Some(path) = mp3 {
-                        let filename = Path::new(&path)
+                    // Process primary audio file (could be any format)
+                    if let Some(path) = primary_audio {
+                        let file_path = path.clone();
+                        let filename = Path::new(&file_path)
                             .file_name()
-                            .unwrap_or_else(|| std::ffi::OsStr::new("track.mp3"))
+                            .unwrap_or_else(|| std::ffi::OsStr::new("track.audio"))
                             .to_string_lossy()
                             .to_string();
-                        files.push((path, filename));
+                        
+                        info!("Primary audio file: {}", filename);
+                        files.push((file_path, filename));
                     }
                     
-                    // Add OGG if available
-                    if let Some(path) = ogg {
-                        let filename = Path::new(&path)
+                    // Process secondary audio file if available
+                    if let Some(path) = secondary_audio {
+                        let file_path = path.clone();
+                        let filename = Path::new(&file_path)
                             .file_name()
-                            .unwrap_or_else(|| std::ffi::OsStr::new("track.ogg"))
+                            .unwrap_or_else(|| std::ffi::OsStr::new("track.audio"))
                             .to_string_lossy()
                             .to_string();
-                        files.push((path, filename));
+                        
+                        info!("Secondary audio file: {}", filename);
+                        files.push((file_path, filename));
                     }
                     
                     if let Some(path) = artwork {
-                        let filename = Path::new(&path)
+                        let file_path = path.clone();
+                        let filename = Path::new(&file_path)
                             .file_name()
                             .unwrap_or_else(|| std::ffi::OsStr::new("cover.jpg"))
                             .to_string_lossy()
                             .to_string();
-                        files.push((path, filename));
+                        
+                        info!("Downloaded artwork: {}", filename);
+                        files.push((file_path, filename));
                     }
                     
                     if let Some(path) = json {
-                        let filename = Path::new(&path)
+                        let file_path = path.clone();
+                        let filename = Path::new(&file_path)
                             .file_name()
                             .unwrap_or_else(|| std::ffi::OsStr::new("data.json"))
                             .to_string_lossy()
                             .to_string();
-                        files.push((path, filename));
+                        
+                        info!("Saved JSON metadata: {}", filename);
+                        files.push((file_path, filename));
                     }
                     
                     files
@@ -986,33 +996,35 @@ async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error::Er
         }
     };
     
-    // Download and transcode audio
+    // Download and process audio
     info!("Processing audio and artwork for track");
     let processing_result = match audio::process_track_audio(&track_details, config.temp_dir.as_deref()).await {
-        Ok((mp3, ogg, artwork, json)) => {
+        Ok((primary_audio, secondary_audio, artwork, json)) => {
             let mut files = Vec::new();
             
-            if let Some(path) = mp3 {
+            // Process primary audio file (could be any format)
+            if let Some(path) = primary_audio {
                 let file_path = path.clone();
                 let filename = Path::new(&file_path)
                     .file_name()
-                    .unwrap_or_else(|| std::ffi::OsStr::new("track.mp3"))
+                    .unwrap_or_else(|| std::ffi::OsStr::new("track.audio"))
                     .to_string_lossy()
                     .to_string();
                 
-                info!("Generated MP3 file: {}", filename);
+                info!("Primary audio file: {}", filename);
                 files.push((file_path, filename));
             }
             
-            if let Some(path) = ogg {
+            // Process secondary audio file if available
+            if let Some(path) = secondary_audio {
                 let file_path = path.clone();
                 let filename = Path::new(&file_path)
                     .file_name()
-                    .unwrap_or_else(|| std::ffi::OsStr::new("track.ogg"))
+                    .unwrap_or_else(|| std::ffi::OsStr::new("track.audio"))
                     .to_string_lossy()
                     .to_string();
                 
-                info!("Generated OGG file: {}", filename);
+                info!("Secondary audio file: {}", filename);
                 files.push((file_path, filename));
             }
             
@@ -1251,10 +1263,18 @@ async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error + Se
         .parse::<usize>()
         .unwrap_or(2);
     
-    println!("\nHow often to save the database (in poll cycles) [1]: ");
-    let db_save_interval = read_line_with_default("1")
-        .parse::<usize>()
-        .unwrap_or(1);
+        println!("\nHow often to save the database (in poll cycles) [1]: ");
+        let db_save_interval = read_line_with_default("1")
+            .parse::<usize>()
+            .unwrap_or(1);
+    
+    println!("\nShow ffmpeg output in console? (true/false) [false]: ");
+    let show_ffmpeg_output = read_line_with_default("false")
+        .parse::<bool>()
+        .unwrap_or(false);
+
+    println!("\nEnter log file path [latest.log]: ");
+    let log_file = read_line_with_default("latest.log");
     
     // Create the config
     let config = Config {
@@ -1274,6 +1294,8 @@ async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error + Se
         auto_follow_interval,
         max_concurrent_processing,
         db_save_interval,
+        show_ffmpeg_output,
+        log_file,
     };
     
     // Create the users

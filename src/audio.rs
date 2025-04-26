@@ -9,7 +9,6 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 use crate::soundcloud::{Track, get_stream_url};
 use lazy_static;
-use reqwest::header::HeaderMap;
 use serde_json::Value;
 
 /// Download and preserve original audio from a SoundCloud track
@@ -469,12 +468,28 @@ async fn download_stream(url: &str, output_path: &Path) -> Result<(), Box<dyn st
 async fn ffmpeg_stream_copy(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Executing ffmpeg stream copy command");
     let mut cmd = TokioCommand::new("ffmpeg");
+    
+    // Check if we should show ffmpeg output
+    let show_output = match crate::config::Config::show_ffmpeg_output() {
+        Some(true) => true,
+        _ => false,
+    };
+    
     cmd.arg("-i")
         .arg(url)
         .arg("-c")
         .arg("copy")  // Copy the stream without re-encoding
-        .arg("-y")  // Overwrite output
-        .arg(output_path);
+        .arg("-y");  // Overwrite output
+    
+    // Configure stdout/stderr redirection based on config
+    if !show_output {
+        // Silence ffmpeg output
+        cmd.stdout(std::process::Stdio::null())
+           .stderr(std::process::Stdio::null());
+    }
+    
+    // Add output path
+    cmd.arg(output_path);
     
     // Log command (without full URL for privacy/security)
     debug!("ffmpeg command: -i [url] -c copy -y {}", 
@@ -493,8 +508,17 @@ async fn ffmpeg_stream_copy(url: &str, output_path: &Path) -> Result<(), Box<dyn
         let mut cmd2 = TokioCommand::new("ffmpeg");
         cmd2.arg("-i")
             .arg(url)
-            .arg("-y")  // Overwrite output
-            .arg(output_path);
+            .arg("-y");  // Overwrite output
+        
+        // Configure stdout/stderr redirection based on config
+        if !show_output {
+            // Silence ffmpeg output
+            cmd2.stdout(std::process::Stdio::null())
+               .stderr(std::process::Stdio::null());
+        }
+        
+        // Add output path
+        cmd2.arg(output_path);
         
         debug!("ffmpeg retry command: -i [url] -y {}", output_path.display());
         
@@ -514,14 +538,30 @@ async fn ffmpeg_stream_copy(url: &str, output_path: &Path) -> Result<(), Box<dyn
 async fn transcode_to_mp3(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Executing ffmpeg MP3 transcoding command");
     let mut cmd = TokioCommand::new("ffmpeg");
+    
+    // Check if we should show ffmpeg output
+    let show_output = match crate::config::Config::show_ffmpeg_output() {
+        Some(true) => true,
+        _ => false,
+    };
+    
     cmd.arg("-i")
         .arg(url)
         .arg("-c:a")
         .arg("libmp3lame")
         .arg("-q:a")
         .arg("2") // High quality (0-9, lower is better)
-        .arg("-y") // Overwrite output
-        .arg(output_path);
+        .arg("-y"); // Overwrite output
+    
+    // Configure stdout/stderr redirection based on config
+    if !show_output {
+        // Silence ffmpeg output
+        cmd.stdout(std::process::Stdio::null())
+           .stderr(std::process::Stdio::null());
+    }
+    
+    // Add output path
+    cmd.arg(output_path);
     
     // Log command (without full URL for privacy/security)
     debug!("ffmpeg command: -i [url] -c:a libmp3lame -q:a 2 -y {}", 
