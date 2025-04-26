@@ -169,42 +169,37 @@ async fn generate_client_id() -> Result<String, Box<dyn std::error::Error + Send
 pub async fn get_user_tracks(
     user_id: &str, 
     limit: usize,
-    pagination_size: usize,
+    _pagination_size: usize, // Keep parameter for backward compatibility
 ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
     let client = &HTTP_CLIENT;
     let mut tracks = Vec::new();
-    let mut offset = 0;
+    let mut seen_track_ids = std::collections::HashSet::new();
     
-    // Use pagination_size for API requests, but cap it at 50 (API limit)
-    let chunk_size = std::cmp::min(50, pagination_size);
-    
-    // First, try to get the user's details to check for total track count
-    let effective_limit = match get_user_details(user_id).await {
-        Ok(user_data) => {
-            if let Some(track_count) = user_data.get("track_count").and_then(|v| v.as_u64()) {
-                let track_count = track_count as usize;
-                info!("User {} has {} tracks according to their profile", user_id, track_count);
-                
-                // Use the smaller of the configured limit or actual track count
-                let effective_limit = std::cmp::min(limit, track_count);
-                if effective_limit < limit {
-                    info!("Will fetch up to {} tracks (user has {} tracks)", 
-                        effective_limit, track_count);
-                }
-                effective_limit
-            } else {
-                info!("Could not determine track count for user {}, using configured limit", user_id);
-                limit
-            }
-        },
+    // First, get the user's details to check for total track count
+    let user_data = match get_user_details(user_id).await {
+        Ok(data) => data,
         Err(e) => {
             warn!("Failed to get user details for {}: {}. Using configured limit.", user_id, e);
-            limit
+            return Ok(Vec::new());
         }
     };
     
-    info!("Fetching up to {} tracks for user {} (with pagination size: {})", 
-          effective_limit, user_id, chunk_size);
+    let total_tracks = match user_data.get("track_count").and_then(|v| v.as_u64()) {
+        Some(count) => count as usize,
+        None => {
+            warn!("Could not determine track count for user {}, using configured limit", user_id);
+            return Ok(Vec::new());
+        }
+    };
+    
+    info!("User {} has {} tracks according to their profile", user_id, total_tracks);
+    
+    // Use the smaller of the configured limit or actual track count
+    let effective_limit = std::cmp::min(limit, total_tracks);
+    if effective_limit < limit {
+        info!("Will fetch up to {} tracks (user has {} tracks)", 
+            effective_limit, total_tracks);
+    }
     
     // Get the current client ID or refresh it
     let mut client_id = match get_client_id() {
@@ -218,153 +213,226 @@ pub async fn get_user_tracks(
         },
     };
     
-    while tracks.len() < effective_limit {
-        let current_limit = std::cmp::min(chunk_size, effective_limit - tracks.len());
-        let url = format!(
-            "https://api-v2.soundcloud.com/users/{}/tracks?client_id={}&offset={}&limit={}",
-            user_id, client_id, offset, current_limit
-        );
+    // Try to fetch all tracks in one go with a large limit
+    let url = format!(
+        "https://api-v2.soundcloud.com/users/{}/tracks?client_id={}&limit={}&linked_partitioning=1",
+        user_id, client_id, effective_limit
+    );
+    
+    debug!("Attempting to fetch all {} tracks in one request", effective_limit);
+    
+    // Make the request with retry logic
+    let mut response_json = None;
+    let max_retries = 3;
+    
+    for retry in 0..max_retries {
+        if retry > 0 {
+            debug!("Retrying tracks fetch (attempt {}/{}) for user {}", 
+                  retry + 1, max_retries, user_id);
+            sleep(Duration::from_secs(2 * retry as u64)).await;
+        }
         
-        debug!("Fetching tracks batch: offset={}, limit={}", offset, current_limit);
-        
-        // Make the request with retry logic
-        let mut response_json = None;
-        let max_retries = 3;
-        
-        for retry in 0..max_retries {
-            if retry > 0 {
-                debug!("Retrying tracks fetch (attempt {}/{}) for user {}", 
-                      retry + 1, max_retries, user_id);
-                sleep(Duration::from_secs(2 * retry as u64)).await;
-            }
-            
-            let response = match client.get(&url).send().await {
-                Ok(res) => {
-                    if !res.status().is_success() {
-                        // Check for auth error and refresh client ID
-                        if res.status().as_u16() == 401 || res.status().as_u16() == 403 {
-                            warn!("Auth error ({}), refreshing client ID", res.status());
-                            client_id = refresh_client_id().await?;
-                            continue;
-                        }
-                        
-                        warn!("API error: HTTP {} when fetching tracks for user {}", res.status(), user_id);
+        let response = match client.get(&url).send().await {
+            Ok(res) => {
+                if !res.status().is_success() {
+                    // Check for auth error and refresh client ID
+                    if res.status().as_u16() == 401 || res.status().as_u16() == 403 {
+                        warn!("Auth error ({}), refreshing client ID", res.status());
+                        client_id = refresh_client_id().await?;
                         continue;
                     }
-                    res
-                }
-                Err(e) => {
-                    warn!("Network error when fetching tracks for user {}: {}", user_id, e);
+                    
+                    warn!("API error: HTTP {} when fetching tracks for user {}", res.status(), user_id);
                     continue;
                 }
-            };
-            
-            match response.json::<Value>().await {
-                Ok(json) => {
-                    response_json = Some(json);
-                    break;
+                res
+            }
+            Err(e) => {
+                warn!("Network error when fetching tracks for user {}: {}", user_id, e);
+                continue;
+            }
+        };
+        
+        match response.json::<Value>().await {
+            Ok(json) => {
+                response_json = Some(json);
+                break;
+            }
+            Err(e) => {
+                warn!("JSON parse error for tracks response: {}", e);
+                if retry == max_retries - 1 {
+                    return Err(format!("Failed to parse JSON after {} retries", max_retries).into());
                 }
-                Err(e) => {
-                    warn!("JSON parse error for tracks response: {}", e);
-                    if retry == max_retries - 1 {
-                        return Err(format!("Failed to parse JSON after {} retries", max_retries).into());
+            }
+        }
+    }
+    
+    let json = match response_json {
+        Some(j) => j,
+        None => {
+            error!("Failed to fetch tracks for user {} after {} retries", user_id, max_retries);
+            return Err(format!("Failed to fetch tracks for user {} after {} retries", 
+                              user_id, max_retries).into());
+        }
+    };
+    
+    // Extract the collection of tracks
+    let collection = match json.get("collection") {
+        Some(Value::Array(arr)) => arr,
+        _ => {
+            error!("Unexpected API response format for user {}: missing 'collection' array", user_id);
+            return Err(format!("Unexpected API response format for user {}", user_id).into());
+        }
+    };
+    
+    if collection.is_empty() {
+        debug!("No tracks found for user {}", user_id);
+        return Ok(Vec::new());
+    }
+    
+    debug!("Processing {} tracks from response", collection.len());
+    
+    // Parse the tracks
+    let mut batch_count = 0;
+    for track_json in collection {
+        // Extract basic fields
+        if let Some(id) = track_json.get("id").and_then(Value::as_u64) {
+            let track_id = id.to_string();
+            
+            // Skip if we've already seen this track
+            if !seen_track_ids.insert(track_id.clone()) {
+                debug!("Skipping duplicate track ID: {}", track_id);
+                continue;
+            }
+            
+            let title = track_json.get("title")
+                .and_then(Value::as_str)
+                .unwrap_or("Untitled")
+                .to_string();
+            
+            debug!("Processing track: {} (ID: {})", title, id);
+            
+            let track = Track {
+                id: track_id,
+                title,
+                permalink_url: track_json.get("permalink_url")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                artwork_url: track_json.get("artwork_url")
+                    .and_then(Value::as_str)
+                    .map(String::from),
+                description: track_json.get("description")
+                    .and_then(Value::as_str)
+                    .map(String::from),
+                user: parse_track_user(track_json),
+                created_at: track_json.get("created_at")
+                    .and_then(Value::as_str)
+                    .unwrap_or("")
+                    .to_string(),
+                duration: track_json.get("duration")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(0),
+                stream_url: track_json.get("stream_url")
+                    .and_then(Value::as_str)
+                    .map(String::from),
+                hls_url: None, // Will be populated when needed
+                download_url: track_json.get("download_url")
+                    .and_then(Value::as_str)
+                    .map(String::from),
+                // Stats
+                playback_count: track_json.get("playback_count").and_then(Value::as_u64),
+                likes_count: track_json.get("likes_count").and_then(Value::as_u64),
+                reposts_count: track_json.get("reposts_count").and_then(Value::as_u64),
+                comment_count: track_json.get("comment_count").and_then(Value::as_u64),
+                // Additional metadata
+                genre: track_json.get("genre").and_then(Value::as_str).map(String::from),
+                tag_list: track_json.get("tag_list").and_then(Value::as_str).map(String::from),
+                downloadable: track_json.get("downloadable").and_then(Value::as_bool),
+                raw_data: Some(track_json.clone()),
+            };
+            tracks.push(track);
+            batch_count += 1;
+        } else {
+            warn!("Track missing ID in API response - skipping");
+        }
+    }
+    
+    debug!("Added {} tracks from batch, total: {}", batch_count, tracks.len());
+    
+    // If we got fewer tracks than expected, try one more time with a different client ID
+    if tracks.len() < effective_limit {
+        warn!("Received fewer tracks than expected ({} < {}), retrying with new client ID", 
+              tracks.len(), effective_limit);
+        
+        // Get a fresh client ID
+        client_id = refresh_client_id().await?;
+        
+        // Make one final attempt
+        let final_url = format!(
+            "https://api-v2.soundcloud.com/users/{}/tracks?client_id={}&limit={}&linked_partitioning=1",
+            user_id, client_id, effective_limit
+        );
+        
+        if let Ok(response) = client.get(&final_url).send().await {
+            if response.status().is_success() {
+                if let Ok(json) = response.json::<Value>().await {
+                    if let Some(Value::Array(arr)) = json.get("collection") {
+                        for track_json in arr {
+                            if let Some(id) = track_json.get("id").and_then(Value::as_u64) {
+                                let track_id = id.to_string();
+                                
+                                // Skip if we've already seen this track
+                                if !seen_track_ids.insert(track_id.clone()) {
+                                    continue;
+                                }
+                                
+                                // Parse and add the track (reusing the same parsing logic)
+                                if let Some(title) = track_json.get("title").and_then(Value::as_str) {
+                                    let track = Track {
+                                        id: track_id,
+                                        title: title.to_string(),
+                                        permalink_url: track_json.get("permalink_url")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        artwork_url: track_json.get("artwork_url")
+                                            .and_then(Value::as_str)
+                                            .map(String::from),
+                                        description: track_json.get("description")
+                                            .and_then(Value::as_str)
+                                            .map(String::from),
+                                        user: parse_track_user(track_json),
+                                        created_at: track_json.get("created_at")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("")
+                                            .to_string(),
+                                        duration: track_json.get("duration")
+                                            .and_then(Value::as_u64)
+                                            .unwrap_or(0),
+                                        stream_url: track_json.get("stream_url")
+                                            .and_then(Value::as_str)
+                                            .map(String::from),
+                                        hls_url: None,
+                                        download_url: track_json.get("download_url")
+                                            .and_then(Value::as_str)
+                                            .map(String::from),
+                                        playback_count: track_json.get("playback_count").and_then(Value::as_u64),
+                                        likes_count: track_json.get("likes_count").and_then(Value::as_u64),
+                                        reposts_count: track_json.get("reposts_count").and_then(Value::as_u64),
+                                        comment_count: track_json.get("comment_count").and_then(Value::as_u64),
+                                        genre: track_json.get("genre").and_then(Value::as_str).map(String::from),
+                                        tag_list: track_json.get("tag_list").and_then(Value::as_str).map(String::from),
+                                        downloadable: track_json.get("downloadable").and_then(Value::as_bool),
+                                        raw_data: Some(track_json.clone()),
+                                    };
+                                    tracks.push(track);
+                                }
+                            }
+                        }
                     }
                 }
             }
-        }
-        
-        let json = match response_json {
-            Some(j) => j,
-            None => {
-                error!("Failed to fetch tracks for user {} after {} retries", user_id, max_retries);
-                return Err(format!("Failed to fetch tracks for user {} after {} retries", 
-                                  user_id, max_retries).into());
-            }
-        };
-        
-        // Extract the collection of tracks
-        let collection = match json.get("collection") {
-            Some(Value::Array(arr)) => arr,
-            _ => {
-                error!("Unexpected API response format for user {}: missing 'collection' array", user_id);
-                return Err(format!("Unexpected API response format for user {}", user_id).into());
-            }
-        };
-        
-        if collection.is_empty() {
-            debug!("No more tracks found for user {} at offset {}", user_id, offset);
-            break; // No more tracks
-        }
-        
-        debug!("Processing {} tracks from response", collection.len());
-        
-        // Parse the tracks
-        let mut batch_count = 0;
-        for track_json in collection {
-            // Extract basic fields
-            if let Some(id) = track_json.get("id").and_then(Value::as_u64) {
-                let title = track_json.get("title")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Untitled")
-                    .to_string();
-                
-                debug!("Processing track: {} (ID: {})", title, id);
-                
-                let track = Track {
-                    id: id.to_string(),
-                    title,
-                    permalink_url: track_json.get("permalink_url")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    artwork_url: track_json.get("artwork_url")
-                        .and_then(Value::as_str)
-                        .map(String::from),
-                    description: track_json.get("description")
-                        .and_then(Value::as_str)
-                        .map(String::from),
-                    user: parse_track_user(track_json),
-                    created_at: track_json.get("created_at")
-                        .and_then(Value::as_str)
-                        .unwrap_or("")
-                        .to_string(),
-                    duration: track_json.get("duration")
-                        .and_then(Value::as_u64)
-                        .unwrap_or(0),
-                    stream_url: track_json.get("stream_url")
-                        .and_then(Value::as_str)
-                        .map(String::from),
-                    hls_url: None, // Will be populated when needed
-                    download_url: track_json.get("download_url")
-                        .and_then(Value::as_str)
-                        .map(String::from),
-                    // Stats
-                    playback_count: track_json.get("playback_count").and_then(Value::as_u64),
-                    likes_count: track_json.get("likes_count").and_then(Value::as_u64),
-                    reposts_count: track_json.get("reposts_count").and_then(Value::as_u64),
-                    comment_count: track_json.get("comment_count").and_then(Value::as_u64),
-                    // Additional metadata
-                    genre: track_json.get("genre").and_then(Value::as_str).map(String::from),
-                    tag_list: track_json.get("tag_list").and_then(Value::as_str).map(String::from),
-                    downloadable: track_json.get("downloadable").and_then(Value::as_bool),
-                    raw_data: Some(track_json.clone()),
-                };
-                tracks.push(track);
-                batch_count += 1;
-            } else {
-                warn!("Track missing ID in API response - skipping");
-            }
-        }
-        
-        debug!("Added {} tracks from batch, total: {}", batch_count, tracks.len());
-        
-        offset += collection.len();
-        
-        // If we got fewer tracks than requested, there are no more
-        if collection.len() < current_limit {
-            debug!("Received fewer tracks than requested ({} < {}), no more available", 
-                  collection.len(), current_limit);
-            break;
         }
     }
     
@@ -873,11 +941,8 @@ pub async fn get_user_likes(
     let mut likes = Vec::new();
     let mut offset = 0;
     
-    // Use pagination_size for API requests, but cap it at 50 (API limit)
-    let chunk_size = std::cmp::min(50, pagination_size);
-    
     info!("Fetching up to {} likes for user {} (with pagination size: {})", 
-          limit, user_id, chunk_size);
+        limit, user_id, pagination_size);
     
     // Get the current client ID or refresh it
     let mut client_id = match get_client_id() {
@@ -893,7 +958,7 @@ pub async fn get_user_likes(
     
     // Keep fetching until we have enough or run out
     while likes.len() < limit {
-        let current_limit = std::cmp::min(chunk_size, limit - likes.len());
+        let current_limit = std::cmp::min(pagination_size, limit - likes.len());
         let url = format!(
             "https://api-v2.soundcloud.com/users/{}/likes?client_id={}&limit={}&offset={}&linked_partitioning=1",
             user_id, client_id, current_limit, offset
