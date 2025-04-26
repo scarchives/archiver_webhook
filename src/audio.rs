@@ -345,6 +345,8 @@ fn extract_available_formats(track: &Track) -> Vec<(String, String)> {
                         .and_then(Value::as_str)
                         .unwrap_or("sq");
                     
+                    // Only use progressive streams for direct download
+                    // HLS streams need special handling
                     let format_string = format!("{}/{}/{}", protocol, mime_type, quality);
                     
                     // Get URL
@@ -356,6 +358,13 @@ fn extract_available_formats(track: &Track) -> Vec<(String, String)> {
             }
         }
     }
+    
+    // Sort formats by priority, so we try the best ones first
+    formats.sort_by(|(format_a, _), (format_b, _)| {
+        let priority_a = get_format_priority(format_a);
+        let priority_b = get_format_priority(format_b);
+        priority_a.cmp(&priority_b)
+    });
     
     formats
 }
@@ -448,34 +457,12 @@ fn get_format_priority(format_info: &str) -> i32 {
 
 /// Download a stream directly
 async fn download_stream(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    debug!("Downloading stream from URL to {}", output_path.display());
+    // For streaming URLs, direct downloads often produce incomplete files
+    // Instead, always use ffmpeg to properly download and process streams
+    debug!("Using ffmpeg to download stream from {}", url);
     
-    // Create reqwest client
-    let client = &HTTP_CLIENT;
-    
-    // Set up headers
-    let mut headers = HeaderMap::new();
-    headers.insert("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36".parse()?);
-    
-    // Download the stream
-    let response = client.get(url)
-        .headers(headers)
-        .send()
-        .await?;
-    
-    if !response.status().is_success() {
-        return Err(format!("Failed to download stream: HTTP {}", response.status()).into());
-    }
-    
-    // Get the stream data
-    let stream_data = response.bytes().await?;
-    
-    // Save to file
-    let mut file = TokioFile::create(output_path).await?;
-    file.write_all(&stream_data).await?;
-    
-    debug!("Stream downloaded successfully to {}", output_path.display());
-    Ok(())
+    // Use ffmpeg with stream copy to preserve original quality
+    ffmpeg_stream_copy(url, output_path).await
 }
 
 /// Use ffmpeg to copy the stream without transcoding
@@ -498,7 +485,25 @@ async fn ffmpeg_stream_copy(url: &str, output_path: &Path) -> Result<(), Box<dyn
     
     if !status.success() {
         error!("ffmpeg stream copy failed with exit code: {}", status);
-        return Err(format!("ffmpeg failed with exit code: {}", status).into());
+        
+        // If stream copy fails, try again with default codec selection
+        // This is necessary for some formats (especially HLS) where stream copy might not work
+        debug!("Retrying with default codec selection");
+        
+        let mut cmd2 = TokioCommand::new("ffmpeg");
+        cmd2.arg("-i")
+            .arg(url)
+            .arg("-y")  // Overwrite output
+            .arg(output_path);
+        
+        debug!("ffmpeg retry command: -i [url] -y {}", output_path.display());
+        
+        let retry_status = cmd2.status().await?;
+        
+        if !retry_status.success() {
+            error!("ffmpeg retry failed with exit code: {}", retry_status);
+            return Err(format!("ffmpeg failed with exit code: {}", retry_status).into());
+        }
     }
     
     debug!("ffmpeg stream copy completed successfully");
