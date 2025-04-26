@@ -637,6 +637,9 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
         let users_vec = users.users.clone();
         let mut users_processed = 0;
         let mut total_new_tracks = 0;
+        
+        // Track new tracks since last save for the per-track save feature
+        let mut tracks_since_last_save = 0;
 
         while users_processed < users_vec.len() {
             let batch_size = std::cmp::min(
@@ -677,6 +680,7 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
                 match task.await {
                     Ok((_user_id, Ok(count))) => {
                         total_new_tracks += count;
+                        tracks_since_last_save += count;
                         if count > 0 {
                             db_needs_saving = true;
                         }
@@ -696,26 +700,35 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
         // Increment the database save counter
         db_save_counter += 1;
         
-        // Save the database if needed and it's time to save or we found new tracks
-        if db_needs_saving || db_save_counter >= config.db_save_interval {
-            debug!("Saving database (interval={}, current={}, new_tracks={})",
-                  config.db_save_interval, db_save_counter, total_new_tracks);
+        // Save the database if:
+        // 1. We found new tracks and reached the track threshold OR
+        // 2. It's time for a scheduled save based on poll cycles
+        let save_by_tracks = db_needs_saving && tracks_since_last_save >= config.db_save_tracks;
+        let save_by_interval = db_save_counter >= config.db_save_interval;
+        
+        if save_by_tracks || save_by_interval {
+            let save_reason = if save_by_tracks {
+                format!("processed {} new tracks (threshold: {})", 
+                       tracks_since_last_save, config.db_save_tracks)
+            } else {
+                format!("reached poll interval {} (current: {})",
+                       config.db_save_interval, db_save_counter)
+            };
+            
+            debug!("Saving database: {}", save_reason);
             
             {
                 let db_guard = db.lock().await;
                 if let Err(e) = db_guard.save() {
                     warn!("Failed to save tracks database: {}", e);
                 } else {
-                    if db_needs_saving {
-                        debug!("Database saved successfully after finding new tracks");
-                    } else {
-                        debug!("Database saved successfully (scheduled save)");
-                    }
+                    debug!("Database saved successfully ({})", save_reason);
                 }
             }
             
             // Reset the counter and flag
             db_save_counter = 0;
+            tracks_since_last_save = 0;
             db_needs_saving = false;
         }
 
@@ -1262,10 +1275,15 @@ async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error + Se
         .parse::<usize>()
         .unwrap_or(2);
     
-        println!("\nHow often to save the database (in poll cycles) [1]: ");
-        let db_save_interval = read_line_with_default("1")
-            .parse::<usize>()
-            .unwrap_or(1);
+    println!("\nHow often to save the database (in poll cycles) [1]: ");
+    let db_save_interval = read_line_with_default("1")
+        .parse::<usize>()
+        .unwrap_or(1);
+
+    println!("\nNumber of tracks to process before saving database [5]: ");
+    let db_save_tracks = read_line_with_default("5")
+        .parse::<usize>()
+        .unwrap_or(5);
     
     println!("\nShow ffmpeg output in console? (true/false) [false]: ");
     let show_ffmpeg_output = read_line_with_default("false")
@@ -1293,6 +1311,7 @@ async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error + Se
         auto_follow_interval,
         max_concurrent_processing,
         db_save_interval,
+        db_save_tracks,
         show_ffmpeg_output,
         log_file,
     };

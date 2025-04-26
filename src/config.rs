@@ -54,6 +54,9 @@ pub struct Config {
     /// How often to save the database (in poll cycles)
     #[serde(default = "default_db_save_interval")]
     pub db_save_interval: usize,
+    /// How many new tracks to process before saving the database
+    #[serde(default = "default_db_save_tracks")]
+    pub db_save_tracks: usize,
     /// Whether to show ffmpeg output in console
     #[serde(default = "default_show_ffmpeg_output")]
     pub show_ffmpeg_output: bool,
@@ -122,6 +125,11 @@ fn default_db_save_interval() -> usize {
     1 // Save after every poll by default
 }
 
+/// Default number of tracks to process before saving the database
+fn default_db_save_tracks() -> usize {
+    50 // Save after processing 5 new tracks
+}
+
 /// Default setting for showing ffmpeg output
 fn default_show_ffmpeg_output() -> bool {
     false // Off by default to reduce console clutter
@@ -151,6 +159,7 @@ impl Default for Config {
             auto_follow_source: None,
             auto_follow_interval: default_auto_follow_interval(),
             db_save_interval: default_db_save_interval(),
+            db_save_tracks: default_db_save_tracks(),
             show_ffmpeg_output: default_show_ffmpeg_output(),
             log_file: default_log_file(),
         }
@@ -251,6 +260,10 @@ impl Config {
         
         if let Some(save_interval) = config_json.get("db_save_interval").and_then(|v| v.as_u64()) {
             config.db_save_interval = save_interval as usize;
+        }
+        
+        if let Some(save_tracks) = config_json.get("db_save_tracks").and_then(|v| v.as_u64()) {
+            config.db_save_tracks = save_tracks as usize;
         }
         
         if let Some(show_ffmpeg) = config_json.get("show_ffmpeg_output").and_then(|v| v.as_bool()) {

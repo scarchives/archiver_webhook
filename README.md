@@ -54,6 +54,7 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
      "auto_follow_source": null,
      "auto_follow_interval": 24,
      "db_save_interval": 1,
+     "db_save_tracks": 5,
      "show_ffmpeg_output": false,
      "log_file": "latest.log"
    }
@@ -187,7 +188,8 @@ docker run --rm \
 - `max_likes_per_user` (default: 500): Maximum number of likes to fetch for each user when `scrape_user_likes` is enabled (uses `pagination_size` for API requests)
 - `auto_follow_source` (optional): User ID or URL whose followings you want to automatically add to your watched users
 - `auto_follow_interval` (default: 24): How often to check for new followings (in poll cycles). Checking is also performed once immediately on startup.
-- `db_save_interval` (default: 1): How often to save the database (in poll cycles). Database is also saved immediately when new tracks are found.
+- `db_save_interval` (default: 1): How often to save the database (in poll cycles).
+- `db_save_tracks` (default: 5): Number of new tracks to process before automatically saving the database. This works in addition to the time-based saving with `db_save_interval`.
 - `show_ffmpeg_output` (default: false): Whether to show ffmpeg output in the console logs
 - `log_file` (default: "latest.log"): Path to the log file for application logs
 
