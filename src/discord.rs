@@ -277,14 +277,13 @@ async fn send_with_audio_files(
     debug!("Preparing multipart request with {} audio files", files.len());
     
     // Discord limits: 
-    // - Max 8MB for regular uploads 
+    // - Max 8MB per file for regular uploads 
     // - Max 10 attachments per message
-    const MAX_DISCORD_UPLOAD_SIZE: u64 = 8 * 1024 * 1024; // 8MB
-    const MAX_ATTACHMENTS: usize = 10;
+    const MAX_DISCORD_UPLOAD_SIZE: u64 = 8 * 1024 * 1024; // 8MB per file
+    const MAX_ATTACHMENTS: usize = 8;
     
     // Filter files to respect Discord limits
     let mut filtered_files = Vec::new();
-    let mut total_size: u64 = 0;
     let mut file_count = 0;
     
     // First pass: get all files and their sizes
@@ -301,10 +300,52 @@ async fn send_with_audio_files(
         file_sizes.push((file_path, file_name, file_size));
     }
     
-    // Sort files by size (smallest first) to maximize number of files we can include
-    file_sizes.sort_by(|a, b| a.2.cmp(&b.2));
+    // Sort files by priority as specified:
+    // 1. m4a and ogg files first
+    // 2. JSON metadata files
+    // 3. Artwork files 
+    // 4. MP3 files last
+    file_sizes.sort_by(|(path_a, _, size_a), (path_b, _, size_b)| {
+        // Get file extensions for easier comparison
+        let ext_a = Path::new(path_a).extension().and_then(|e| e.to_str()).unwrap_or("");
+        let ext_b = Path::new(path_b).extension().and_then(|e| e.to_str()).unwrap_or("");
+        
+        // First priority: M4A and OGG files
+        let is_m4a_ogg_a = ext_a == "m4a" || ext_a == "ogg" || ext_a == "opus";
+        let is_m4a_ogg_b = ext_b == "m4a" || ext_b == "ogg" || ext_b == "opus";
+        if is_m4a_ogg_a && !is_m4a_ogg_b {
+            return std::cmp::Ordering::Less;
+        }
+        if !is_m4a_ogg_a && is_m4a_ogg_b {
+            return std::cmp::Ordering::Greater;
+        }
+        
+        // Second priority: JSON metadata files
+        let is_json_a = ext_a == "json";
+        let is_json_b = ext_b == "json";
+        if is_json_a && !is_json_b {
+            return std::cmp::Ordering::Less;
+        }
+        if !is_json_a && is_json_b {
+            return std::cmp::Ordering::Greater;
+        }
+        
+        // Third priority: Artwork files
+        let is_image_a = ext_a == "jpg" || ext_a == "jpeg" || ext_a == "png";
+        let is_image_b = ext_b == "jpg" || ext_b == "jpeg" || ext_b == "png";
+        if is_image_a && !is_image_b {
+            return std::cmp::Ordering::Less;
+        }
+        if !is_image_a && is_image_b {
+            return std::cmp::Ordering::Greater;
+        }
+        
+        // MP3 files come last automatically
+        // For files of the same type, prefer smaller files first
+        size_a.cmp(size_b)
+    });
     
-    // Add files until we hit limits
+    // Add files until we hit the attachment limit
     let file_sizes_len = file_sizes.len();
     for (file_path, file_name, file_size) in file_sizes {
         // Check if we would exceed limits by adding this file
@@ -313,21 +354,21 @@ async fn send_with_audio_files(
             break;
         }
         
-        if total_size + file_size > MAX_DISCORD_UPLOAD_SIZE {
-            warn!("File {} would exceed Discord size limit ({} + {} > {})", 
-                 file_name, total_size, file_size, MAX_DISCORD_UPLOAD_SIZE);
+        // Check each file individually against the 8MB limit
+        if file_size > MAX_DISCORD_UPLOAD_SIZE {
+            warn!("File {} exceeds Discord size limit ({} > {})", 
+                 file_name, file_size, MAX_DISCORD_UPLOAD_SIZE);
             continue;
         }
         
         // Add the file
         filtered_files.push((file_path, file_name));
-        total_size += file_size;
         file_count += 1;
     }
     
     if filtered_files.len() < file_sizes_len {
-        warn!("Some files were excluded due to Discord limits: {} of {} files included ({} bytes total)",
-             filtered_files.len(), file_sizes_len, total_size);
+        warn!("Some files were excluded due to Discord limits: {} of {} files included",
+             filtered_files.len(), file_sizes_len);
     }
     
     // Create a multipart form

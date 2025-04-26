@@ -264,13 +264,13 @@ For each track, the bot will:
 2. Download the original high-resolution artwork
 3. Create a complete JSON snapshot of all track metadata
 4. Send everything to Discord with a rich embed containing track details
-5. Automatically handle Discord's upload size limits (8MB for regular, up to 10 attachments per message)
+5. Automatically handle Discord's upload restrictions (8MB per file limit, max 10 attachments per message)
 
 The bot attempts to preserve all available audio qualities and formats rather than just converting to MP3/OGG.
 
 ## Limitations
 
-- Discord has attachment size limits (8MB for regular, 50MB for Nitro boosts)
+- Discord has attachment size limits (8MB per file for regular servers, 50MB per file for Nitro-boosted servers)
 - Rate limits apply to both SoundCloud API and Discord webhooks
 - FFMPEG must be installed and in PATH for audio transcoding
 
