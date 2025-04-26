@@ -375,7 +375,7 @@ async fn initialize_tracks_database() -> Result<(), Box<dyn std::error::Error + 
         // If enabled, get liked tracks too
         if config.scrape_user_likes {
             info!("Fetching likes for user {} (enabled in config)", user_id);
-            match soundcloud::get_user_likes(user_id, config.max_likes_per_user).await {
+            match soundcloud::get_user_likes(user_id, config.max_likes_per_user, config.pagination_size).await {
                 Ok(likes) => {
                     let liked_tracks = soundcloud::extract_tracks_from_likes(&likes);
                     info!("Found {} liked tracks for user {}", liked_tracks.len(), user_id);
@@ -728,7 +728,7 @@ async fn poll_user(
     
     if config.scrape_user_likes {
         debug!("Fetching likes for user {} (enabled in config)", user_id);
-        match soundcloud::get_user_likes(user_id, config.max_likes_per_user).await {
+        match soundcloud::get_user_likes(user_id, config.max_likes_per_user, config.pagination_size).await {
             Ok(likes) => {
                 info!("Fetched {} likes for user {}", likes.len(), user_id);
                 

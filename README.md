@@ -5,7 +5,7 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
 ## Features
 
 - Monitors SoundCloud users for new track uploads
-- Downloads and transcodes tracks to MP3 and OGG formats
+- Downloads all available audio formats (MP3, AAC, Opus, etc.) for best quality preservation
 - Downloads original high-resolution artwork
 - Creates complete JSON snapshots of track metadata
 - Sends rich embeds to Discord with track details and media files
@@ -53,7 +53,9 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
      "max_likes_per_user": 500,
      "auto_follow_source": null,
      "auto_follow_interval": 24,
-     "db_save_interval": 1
+     "db_save_interval": 1,
+     "show_ffmpeg_output": false,
+     "log_file": "latest.log"
    }
    ```
 4. Create a `users.json` file with the SoundCloud user IDs to watch:
@@ -176,16 +178,18 @@ docker run --rm \
 - `users_file` (default: "users.json"): Path to the file containing user IDs to watch
 - `tracks_file` (default: "tracks.json"): Path to the tracks database file for persistent storage
 - `max_tracks_per_user` (default: 500): Maximum number of tracks to fetch per user (total limit)
-- `pagination_size` (default: 50): Number of tracks to fetch per API request (pagination size)
+- `pagination_size` (default: 50): Number of tracks/likes to fetch per API request (pagination size)
 - `track_count_buffer` (default: 5): Extra tracks to fetch beyond a user's reported track count
 - `temp_dir` (optional): Directory for temporary files (if not specified, system temp dir is used)
 - `max_parallel_fetches` (default: 4): Maximum number of users to process in parallel
 - `max_concurrent_processing` (default: 2): Maximum number of concurrent ffmpeg processes per user
 - `scrape_user_likes` (default: false): Whether to scrape liked tracks from users being monitored
-- `max_likes_per_user` (default: 500): Maximum number of likes to fetch for each user when `scrape_user_likes` is enabled
+- `max_likes_per_user` (default: 500): Maximum number of likes to fetch for each user when `scrape_user_likes` is enabled (uses `pagination_size` for API requests)
 - `auto_follow_source` (optional): User ID or URL whose followings you want to automatically add to your watched users
 - `auto_follow_interval` (default: 24): How often to check for new followings (in poll cycles). Checking is also performed once immediately on startup.
 - `db_save_interval` (default: 1): How often to save the database (in poll cycles). Database is also saved immediately when new tracks are found.
+- `show_ffmpeg_output` (default: false): Whether to show ffmpeg output in the console logs
+- `log_file` (default: "latest.log"): Path to the log file for application logs
 
 ## Usage
 
@@ -256,10 +260,13 @@ SoundCloud doesn't expose user IDs directly in the UI, but you can find them by:
 ## What Gets Archived
 
 For each track, the bot will:
-1. Download and transcode audio to MP3 and OGG formats
+1. Download all available audio formats (MP3, AAC, Opus, etc.) depending on what SoundCloud provides
 2. Download the original high-resolution artwork
 3. Create a complete JSON snapshot of all track metadata
 4. Send everything to Discord with a rich embed containing track details
+5. Automatically handle Discord's upload size limits (8MB for regular, up to 10 attachments per message)
+
+The bot attempts to preserve all available audio qualities and formats rather than just converting to MP3/OGG.
 
 ## Limitations
 

@@ -870,16 +870,18 @@ fn extract_offset_from_url(url: &str) -> Option<usize> {
 /// Get likes for a SoundCloud user
 pub async fn get_user_likes(
     user_id: &str, 
-    limit: usize
+    limit: usize,
+    pagination_size: usize
 ) -> Result<Vec<Like>, Box<dyn std::error::Error + Send + Sync>> {
     let client = &HTTP_CLIENT;
     let mut likes = Vec::new();
     let mut offset = 0;
     
-    // Use pagination with a reasonable chunk size, max 50 per request
-    let chunk_size = std::cmp::min(50, limit);
+    // Use pagination_size for API requests, but cap it at 50 (API limit)
+    let chunk_size = std::cmp::min(50, pagination_size);
     
-    info!("Fetching up to {} likes for user {}", limit, user_id);
+    info!("Fetching up to {} likes for user {} (with pagination size: {})", 
+          limit, user_id, chunk_size);
     
     // Get the current client ID or refresh it
     let mut client_id = match get_client_id() {
