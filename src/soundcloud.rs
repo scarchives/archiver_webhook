@@ -195,11 +195,8 @@ pub async fn get_user_tracks(
     info!("User {} has {} tracks according to their profile", user_id, total_tracks);
     
     // Use the smaller of the configured limit or actual track count
-    let effective_limit = std::cmp::min(limit, total_tracks);
-    if effective_limit < limit {
-        info!("Will fetch up to {} tracks (user has {} tracks)", 
-            effective_limit, total_tracks);
-    }
+    let effective_limit = limit;
+    info!("Will fetch up to {} tracks", effective_limit);
     
     // Get the current client ID or refresh it
     let mut client_id = match get_client_id() {
@@ -935,14 +932,13 @@ fn extract_offset_from_url(url: &str) -> Option<usize> {
 pub async fn get_user_likes(
     user_id: &str, 
     limit: usize,
-    pagination_size: usize
+    _pagination_size: usize, // Keep parameter for backward compatibility
 ) -> Result<Vec<Like>, Box<dyn std::error::Error + Send + Sync>> {
     let client = &HTTP_CLIENT;
     let mut likes = Vec::new();
-    let mut offset = 0;
+    let mut seen_like_ids = std::collections::HashSet::new();
     
-    info!("Fetching up to {} likes for user {} (with pagination size: {})", 
-        limit, user_id, pagination_size);
+    info!("Fetching up to {} likes for user {}", limit, user_id);
     
     // Get the current client ID or refresh it
     let mut client_id = match get_client_id() {
@@ -956,182 +952,262 @@ pub async fn get_user_likes(
         },
     };
     
-    // Keep fetching until we have enough or run out
-    while likes.len() < limit {
-        let current_limit = std::cmp::min(pagination_size, limit - likes.len());
-        let url = format!(
-            "https://api-v2.soundcloud.com/users/{}/likes?client_id={}&limit={}&offset={}&linked_partitioning=1",
-            user_id, client_id, current_limit, offset
-        );
+    // Try to fetch all likes in one go with a large limit
+    let url = format!(
+        "https://api-v2.soundcloud.com/users/{}/likes?client_id={}&limit={}&linked_partitioning=1",
+        user_id, client_id, limit
+    );
+    
+    debug!("Attempting to fetch all {} likes in one request", limit);
+    
+    // Make the request with retry logic
+    let mut response_json = None;
+    let max_retries = 3;
+    
+    for retry in 0..max_retries {
+        if retry > 0 {
+            debug!("Retrying likes fetch (attempt {}/{}) for user {}", 
+                  retry + 1, max_retries, user_id);
+            sleep(Duration::from_secs(2 * retry as u64)).await;
+        }
         
-        debug!("Fetching likes batch: offset={}, limit={}", offset, current_limit);
-        
-        // Make the request with retry logic
-        let mut response_json = None;
-        let max_retries = 3;
-        
-        for retry in 0..max_retries {
-            if retry > 0 {
-                debug!("Retrying likes fetch (attempt {}/{}) for user {}", 
-                      retry + 1, max_retries, user_id);
-                sleep(Duration::from_secs(2 * retry as u64)).await;
+        let response = match client.get(&url).send().await {
+            Ok(res) => {
+                if !res.status().is_success() {
+                    // Check for auth error and refresh client ID
+                    if res.status().as_u16() == 401 || res.status().as_u16() == 403 {
+                        warn!("Auth error ({}), refreshing client ID", res.status());
+                        client_id = refresh_client_id().await?;
+                        continue;
+                    }
+                    
+                    warn!("API error: HTTP {} when fetching likes for user {}", res.status(), user_id);
+                    continue;
+                }
+                res
             }
-            
-            let response = match client.get(&url).send().await {
-                Ok(res) => {
-                    if !res.status().is_success() {
-                        // Check for auth error and refresh client ID
-                        if res.status().as_u16() == 401 || res.status().as_u16() == 403 {
-                            warn!("Auth error ({}), refreshing client ID", res.status());
-                            client_id = refresh_client_id().await?;
+            Err(e) => {
+                warn!("Network error when fetching likes for user {}: {}", user_id, e);
+                continue;
+            }
+        };
+        
+        match response.json::<Value>().await {
+            Ok(json) => {
+                response_json = Some(json);
+                break;
+            }
+            Err(e) => {
+                warn!("JSON parse error for likes response: {}", e);
+                if retry == max_retries - 1 {
+                    return Err(format!("Failed to parse JSON after {} retries", max_retries).into());
+                }
+            }
+        }
+    }
+    
+    let json = match response_json {
+        Some(j) => j,
+        None => {
+            error!("Failed to fetch likes for user {} after {} retries", user_id, max_retries);
+            return Err(format!("Failed to fetch likes for user {} after {} retries", 
+                              user_id, max_retries).into());
+        }
+    };
+    
+    // Extract the collection of likes
+    let collection = match json.get("collection") {
+        Some(Value::Array(arr)) => arr,
+        _ => {
+            error!("Unexpected API response format for user {}: missing 'collection' array", user_id);
+            return Err(format!("Unexpected API response format for user {}", user_id).into());
+        }
+    };
+    
+    if collection.is_empty() {
+        debug!("No likes found for user {}", user_id);
+        return Ok(Vec::new());
+    }
+    
+    debug!("Processing {} likes from response", collection.len());
+    
+    // Parse the likes
+    let mut batch_count = 0;
+    for like_json in collection {
+        // Each like contains a track
+        if let Some(track_json) = like_json.get("track") {
+            if let Some(kind) = like_json.get("kind").and_then(Value::as_str) {
+                if kind == "like" {
+                    // Parse the created_at date
+                    let created_at = like_json.get("created_at")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    
+                    // Extract track
+                    if let Some(id) = track_json.get("id").and_then(Value::as_u64) {
+                        let track_id = id.to_string();
+                        
+                        // Skip if we've already seen this like
+                        if !seen_like_ids.insert(track_id.clone()) {
+                            debug!("Skipping duplicate like for track ID: {}", track_id);
                             continue;
                         }
                         
-                        warn!("API error: HTTP {} when fetching likes for user {}", res.status(), user_id);
-                        continue;
-                    }
-                    res
-                }
-                Err(e) => {
-                    warn!("Network error when fetching likes for user {}: {}", user_id, e);
-                    continue;
-                }
-            };
-            
-            match response.json::<Value>().await {
-                Ok(json) => {
-                    response_json = Some(json);
-                    break;
-                }
-                Err(e) => {
-                    warn!("JSON parse error for likes response: {}", e);
-                    if retry == max_retries - 1 {
-                        return Err(format!("Failed to parse JSON after {} retries", max_retries).into());
-                    }
-                }
-            }
-        }
-        
-        let json = match response_json {
-            Some(j) => j,
-            None => {
-                error!("Failed to fetch likes for user {} after {} retries", user_id, max_retries);
-                return Err(format!("Failed to fetch likes for user {} after {} retries", 
-                                  user_id, max_retries).into());
-            }
-        };
-        
-        // Extract the collection of likes
-        let collection = match json.get("collection") {
-            Some(Value::Array(arr)) => arr,
-            _ => {
-                error!("Unexpected API response format for user {}: missing 'collection' array", user_id);
-                return Err(format!("Unexpected API response format for user {}", user_id).into());
-            }
-        };
-        
-        if collection.is_empty() {
-            debug!("No more likes found for user {} at offset {}", user_id, offset);
-            break; // No more likes
-        }
-        
-        debug!("Processing {} likes from response", collection.len());
-        
-        // Parse the likes
-        let mut batch_count = 0;
-        for like_json in collection {
-            // Each like contains a track
-            if let Some(track_json) = like_json.get("track") {
-                if let Some(kind) = like_json.get("kind").and_then(Value::as_str) {
-                    if kind == "like" {
-                        // Parse the created_at date
-                        let created_at = like_json.get("created_at")
+                        let title = track_json.get("title")
                             .and_then(Value::as_str)
-                            .unwrap_or("")
+                            .unwrap_or("Untitled")
                             .to_string();
                         
-                        // Extract track
-                        if let Some(id) = track_json.get("id").and_then(Value::as_u64) {
-                            let title = track_json.get("title")
+                        debug!("Processing liked track: {} (ID: {})", title, id);
+                        
+                        let track = Track {
+                            id: track_id,
+                            title,
+                            permalink_url: track_json.get("permalink_url")
                                 .and_then(Value::as_str)
-                                .unwrap_or("Untitled")
-                                .to_string();
-                            
-                            debug!("Processing liked track: {} (ID: {})", title, id);
-                            
-                            let track = Track {
-                                id: id.to_string(),
-                                title,
-                                permalink_url: track_json.get("permalink_url")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string(),
-                                artwork_url: track_json.get("artwork_url")
-                                    .and_then(Value::as_str)
-                                    .map(String::from),
-                                description: track_json.get("description")
-                                    .and_then(Value::as_str)
-                                    .map(String::from),
-                                user: parse_track_user(track_json),
-                                created_at: track_json.get("created_at")
-                                    .and_then(Value::as_str)
-                                    .unwrap_or("")
-                                    .to_string(),
-                                duration: track_json.get("duration")
-                                    .and_then(Value::as_u64)
-                                    .unwrap_or(0),
-                                stream_url: track_json.get("stream_url")
-                                    .and_then(Value::as_str)
-                                    .map(String::from),
-                                hls_url: None, // Will be populated when needed
-                                download_url: track_json.get("download_url")
-                                    .and_then(Value::as_str)
-                                    .map(String::from),
-                                // Stats
-                                playback_count: track_json.get("playback_count").and_then(Value::as_u64),
-                                likes_count: track_json.get("likes_count").and_then(Value::as_u64),
-                                reposts_count: track_json.get("reposts_count").and_then(Value::as_u64),
-                                comment_count: track_json.get("comment_count").and_then(Value::as_u64),
-                                // Additional metadata
-                                genre: track_json.get("genre").and_then(Value::as_str).map(String::from),
-                                tag_list: track_json.get("tag_list").and_then(Value::as_str).map(String::from),
-                                downloadable: track_json.get("downloadable").and_then(Value::as_bool),
-                                raw_data: Some(track_json.clone()),
-                            };
-                            
-                            // Create the like structure
-                            let like = Like {
-                                created_at,
-                                kind: kind.to_string(),
-                                track,
-                            };
-                            
-                            likes.push(like);
-                            batch_count += 1;
+                                .unwrap_or("")
+                                .to_string(),
+                            artwork_url: track_json.get("artwork_url")
+                                .and_then(Value::as_str)
+                                .map(String::from),
+                            description: track_json.get("description")
+                                .and_then(Value::as_str)
+                                .map(String::from),
+                            user: parse_track_user(track_json),
+                            created_at: track_json.get("created_at")
+                                .and_then(Value::as_str)
+                                .unwrap_or("")
+                                .to_string(),
+                            duration: track_json.get("duration")
+                                .and_then(Value::as_u64)
+                                .unwrap_or(0),
+                            stream_url: track_json.get("stream_url")
+                                .and_then(Value::as_str)
+                                .map(String::from),
+                            hls_url: None, // Will be populated when needed
+                            download_url: track_json.get("download_url")
+                                .and_then(Value::as_str)
+                                .map(String::from),
+                            // Stats
+                            playback_count: track_json.get("playback_count").and_then(Value::as_u64),
+                            likes_count: track_json.get("likes_count").and_then(Value::as_u64),
+                            reposts_count: track_json.get("reposts_count").and_then(Value::as_u64),
+                            comment_count: track_json.get("comment_count").and_then(Value::as_u64),
+                            // Additional metadata
+                            genre: track_json.get("genre").and_then(Value::as_str).map(String::from),
+                            tag_list: track_json.get("tag_list").and_then(Value::as_str).map(String::from),
+                            downloadable: track_json.get("downloadable").and_then(Value::as_bool),
+                            raw_data: Some(track_json.clone()),
+                        };
+                        
+                        // Create the like structure
+                        let like = Like {
+                            created_at,
+                            kind: kind.to_string(),
+                            track,
+                        };
+                        
+                        likes.push(like);
+                        batch_count += 1;
+                    }
+                }
+            }
+        }
+    }
+    
+    debug!("Added {} likes from batch, total: {}", batch_count, likes.len());
+    
+    // If we got fewer likes than expected, try one more time with a different client ID
+    if likes.len() < limit {
+        warn!("Received fewer likes than expected ({} < {}), retrying with new client ID", 
+              likes.len(), limit);
+        
+        // Get a fresh client ID
+        client_id = refresh_client_id().await?;
+        
+        // Make one final attempt
+        let final_url = format!(
+            "https://api-v2.soundcloud.com/users/{}/likes?client_id={}&limit={}&linked_partitioning=1",
+            user_id, client_id, limit
+        );
+        
+        if let Ok(response) = client.get(&final_url).send().await {
+            if response.status().is_success() {
+                if let Ok(json) = response.json::<Value>().await {
+                    if let Some(Value::Array(arr)) = json.get("collection") {
+                        for like_json in arr {
+                            if let Some(track_json) = like_json.get("track") {
+                                if let Some(kind) = like_json.get("kind").and_then(Value::as_str) {
+                                    if kind == "like" {
+                                        let created_at = like_json.get("created_at")
+                                            .and_then(Value::as_str)
+                                            .unwrap_or("")
+                                            .to_string();
+                                        
+                                        if let Some(id) = track_json.get("id").and_then(Value::as_u64) {
+                                            let track_id = id.to_string();
+                                            
+                                            // Skip if we've already seen this like
+                                            if !seen_like_ids.insert(track_id.clone()) {
+                                                continue;
+                                            }
+                                            
+                                            if let Some(title) = track_json.get("title").and_then(Value::as_str) {
+                                                let track = Track {
+                                                    id: track_id,
+                                                    title: title.to_string(),
+                                                    permalink_url: track_json.get("permalink_url")
+                                                        .and_then(Value::as_str)
+                                                        .unwrap_or("")
+                                                        .to_string(),
+                                                    artwork_url: track_json.get("artwork_url")
+                                                        .and_then(Value::as_str)
+                                                        .map(String::from),
+                                                    description: track_json.get("description")
+                                                        .and_then(Value::as_str)
+                                                        .map(String::from),
+                                                    user: parse_track_user(track_json),
+                                                    created_at: track_json.get("created_at")
+                                                        .and_then(Value::as_str)
+                                                        .unwrap_or("")
+                                                        .to_string(),
+                                                    duration: track_json.get("duration")
+                                                        .and_then(Value::as_u64)
+                                                        .unwrap_or(0),
+                                                    stream_url: track_json.get("stream_url")
+                                                        .and_then(Value::as_str)
+                                                        .map(String::from),
+                                                    hls_url: None,
+                                                    download_url: track_json.get("download_url")
+                                                        .and_then(Value::as_str)
+                                                        .map(String::from),
+                                                    playback_count: track_json.get("playback_count").and_then(Value::as_u64),
+                                                    likes_count: track_json.get("likes_count").and_then(Value::as_u64),
+                                                    reposts_count: track_json.get("reposts_count").and_then(Value::as_u64),
+                                                    comment_count: track_json.get("comment_count").and_then(Value::as_u64),
+                                                    genre: track_json.get("genre").and_then(Value::as_str).map(String::from),
+                                                    tag_list: track_json.get("tag_list").and_then(Value::as_str).map(String::from),
+                                                    downloadable: track_json.get("downloadable").and_then(Value::as_bool),
+                                                    raw_data: Some(track_json.clone()),
+                                                };
+                                                
+                                                let like = Like {
+                                                    created_at,
+                                                    kind: kind.to_string(),
+                                                    track,
+                                                };
+                                                
+                                                likes.push(like);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                         }
                     }
                 }
             }
-        }
-        
-        debug!("Added {} likes from batch, total: {}", batch_count, likes.len());
-        
-        // Check if there are more likes
-        if let Some(next_href) = json.get("next_href").and_then(Value::as_str) {
-            // For likes, the offset is a bit complex - it's a timestamp-based cursor
-            // We can just use the URL as is
-            debug!("Next page available: {}", next_href);
-            offset += collection.len();
-        } else {
-            debug!("No more likes found for user {}", user_id);
-            break;
-        }
-        
-        // If we got fewer likes than requested, there are no more
-        if collection.len() < current_limit {
-            debug!("Received fewer likes than requested ({} < {}), no more available", 
-                  collection.len(), current_limit);
-            break;
         }
     }
     
