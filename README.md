@@ -45,7 +45,6 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
      "tracks_file": "tracks.json",
      "max_tracks_per_user": 500,
      "pagination_size": 50,
-     "track_count_buffer": 5,
      "temp_dir": null,
      "max_parallel_fetches": 4,
      "max_concurrent_processing": 2,
@@ -180,7 +179,6 @@ docker run --rm \
 - `tracks_file` (default: "tracks.json"): Path to the tracks database file for persistent storage
 - `max_tracks_per_user` (default: 500): Maximum number of tracks to fetch per user (total limit)
 - `pagination_size` (default: 50): Number of tracks/likes to fetch per API request (pagination size)
-- `track_count_buffer` (default: 5): Extra tracks to fetch beyond a user's reported track count
 - `temp_dir` (optional): Directory for temporary files (if not specified, system temp dir is used)
 - `max_parallel_fetches` (default: 4): Maximum number of users to process in parallel
 - `max_concurrent_processing` (default: 2): Maximum number of concurrent ffmpeg processes per user

@@ -361,7 +361,7 @@ async fn initialize_tracks_database() -> Result<(), Box<dyn std::error::Error + 
         let mut all_tracks = Vec::new();
         
         // Get uploaded tracks
-        match soundcloud::get_user_tracks(user_id, config.max_tracks_per_user, config.pagination_size, config.track_count_buffer).await {
+        match soundcloud::get_user_tracks(user_id, config.max_tracks_per_user, config.pagination_size).await {
             Ok(tracks) => {
                 info!("Found {} uploaded tracks for user {}", tracks.len(), user_id);
                 all_tracks.extend(tracks);
@@ -749,7 +749,7 @@ async fn poll_user(
     db: &Arc<Mutex<TrackDatabase>>,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
     // Fetch latest tracks from SoundCloud
-    let tracks = match soundcloud::get_user_tracks(user_id, config.max_tracks_per_user, config.pagination_size, config.track_count_buffer).await {
+    let tracks = match soundcloud::get_user_tracks(user_id, config.max_tracks_per_user, config.pagination_size).await {
         Ok(t) => t,
         Err(e) => {
             error!("Failed to fetch tracks for user {}: {}", user_id, e);
@@ -1229,11 +1229,6 @@ async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error + Se
         .parse::<usize>()
         .unwrap_or(50);
     
-    println!("\nEnter track count buffer [5]: ");
-    let track_count_buffer = read_line_with_default("5")
-        .parse::<usize>()
-        .unwrap_or(5);
-    
     println!("\nEnter temp directory [use system temp]: ");
     let temp_dir = read_line_with_default("");
     let temp_dir = if temp_dir.trim().is_empty() {
@@ -1302,7 +1297,6 @@ async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error + Se
         tracks_file,
         max_tracks_per_user,
         pagination_size,
-        track_count_buffer,
         temp_dir,
         max_parallel_fetches,
         scrape_user_likes,

@@ -170,7 +170,6 @@ pub async fn get_user_tracks(
     user_id: &str, 
     limit: usize,
     pagination_size: usize,
-    track_count_buffer: usize
 ) -> Result<Vec<Track>, Box<dyn std::error::Error + Send + Sync>> {
     let client = &HTTP_CLIENT;
     let mut tracks = Vec::new();
@@ -186,14 +185,11 @@ pub async fn get_user_tracks(
                 let track_count = track_count as usize;
                 info!("User {} has {} tracks according to their profile", user_id, track_count);
                 
-                // Add buffer to account for potential new tracks since profile was loaded
-                let buffered_count = track_count + track_count_buffer;
-                
-                // Use the smaller of the configured limit or actual track count (with buffer)
-                let effective_limit = std::cmp::min(limit, buffered_count);
+                // Use the smaller of the configured limit or actual track count
+                let effective_limit = std::cmp::min(limit, track_count);
                 if effective_limit < limit {
-                    info!("Will fetch up to {} tracks (user has {} tracks + {} buffer)", 
-                        effective_limit, track_count, track_count_buffer);
+                    info!("Will fetch up to {} tracks (user has {} tracks)", 
+                        effective_limit, track_count);
                 }
                 effective_limit
             } else {
