@@ -9,9 +9,15 @@ use tokio::io::AsyncWriteExt;
 use uuid::Uuid;
 use crate::soundcloud::{Track, get_stream_url};
 use lazy_static;
+use reqwest::header::HeaderMap;
+use serde_json::Value;
 
-/// Download and transcode audio from a SoundCloud track
-/// Returns paths to the MP3, OGG, Artwork, and JSON metadata files
+/// Download and preserve original audio from a SoundCloud track
+/// Returns paths to the downloaded files:
+/// - First value: Original stream file (or transcoded MP3 if necessary as fallback)
+/// - Second value: Secondary format (like OGG/Opus) if available
+/// - Third value: Artwork file
+/// - Fourth value: JSON metadata file
 pub async fn process_track_audio(
     track: &Track,
     temp_dir: Option<&str>
@@ -57,51 +63,211 @@ pub async fn process_track_audio(
         }
     }
     
-    // Resolve the HLS URL if we have one
-    let hls_url = match &track.hls_url {
-        Some(url) => {
-            debug!("Resolving HLS URL for track {}", track.id);
-            match get_stream_url(url).await {
-                Ok(resolved) => {
-                    info!("Successfully resolved HLS URL for track {}", track.id);
-                    Some(resolved)
-                },
-                Err(e) => {
-                    warn!("Failed to resolve HLS URL for track {}: {}", track.id, e);
-                    None
-                }
-            }
-        },
-        None => {
-            warn!("No HLS URL available for track {}, checking other streams", track.id);
-            None
-        }
-    };
+    // Extract all available formats from the raw data
+    let available_formats = extract_available_formats(track);
+    debug!("Found {} available formats for track {}", available_formats.len(), track.id);
     
-    // Resolve the stream URL if we have one (and no HLS)
-    let stream_url = if hls_url.is_none() {
-        match &track.stream_url {
+    // First try to download all available formats in their original format
+    let mut downloaded_files = Vec::new();
+    
+    // If we have raw transcodings data, use it
+    for (format_info, url) in available_formats {
+        debug!("Attempting to download format: {} at {}", format_info, url);
+        
+        // Resolve the stream URL
+        match get_stream_url(&url).await {
+            Ok(resolved_url) => {
+                // Determine file extension based on format info
+                let extension = determine_extension_from_format(&format_info);
+                let safe_format = sanitize_format_string(&format_info);
+                let output_path = work_dir.join(format!("{}_{}.{}", sanitized_title, safe_format, extension));
+                
+                debug!("Downloading stream to: {}", output_path.display());
+                
+                // Download the stream directly
+                match download_stream(&resolved_url, &output_path).await {
+                    Ok(()) => {
+                        let file_size = match fs::metadata(&output_path) {
+                            Ok(metadata) => metadata.len(),
+                            Err(_) => 0,
+                        };
+                        
+                        info!("Successfully downloaded {} format: {} ({} bytes)", 
+                              format_info, output_path.display(), file_size);
+                        downloaded_files.push((format_info, output_path.to_string_lossy().to_string()));
+                    },
+                    Err(e) => {
+                        warn!("Failed to download {} format: {}", format_info, e);
+                    }
+                }
+            },
+            Err(e) => {
+                warn!("Failed to resolve URL for {} format: {}", format_info, e);
+            }
+        }
+    }
+    
+    // Fallback: Use our existing HLS and stream_url fields if we didn't get anything
+    if downloaded_files.is_empty() {
+        debug!("No formats downloaded from transcodings, falling back to HLS/stream URLs");
+        
+        // Resolve the HLS URL if we have one
+        let hls_url = match &track.hls_url {
             Some(url) => {
-                debug!("Resolving stream URL for track {}", track.id);
+                debug!("Resolving HLS URL for track {}", track.id);
                 match get_stream_url(url).await {
                     Ok(resolved) => {
-                        info!("Successfully resolved stream URL for track {}", track.id);
+                        info!("Successfully resolved HLS URL for track {}", track.id);
                         Some(resolved)
                     },
                     Err(e) => {
-                        warn!("Failed to resolve stream URL for track {}: {}", track.id, e);
+                        warn!("Failed to resolve HLS URL for track {}: {}", track.id, e);
                         None
                     }
                 }
             },
             None => {
-                warn!("No stream URL available for track {}", track.id);
+                warn!("No HLS URL available for track {}, checking other streams", track.id);
                 None
             }
+        };
+        
+        // Resolve the stream URL if we have one (and no HLS)
+        let stream_url = if downloaded_files.is_empty() {
+            match &track.stream_url {
+                Some(url) => {
+                    debug!("Resolving stream URL for track {}", track.id);
+                    match get_stream_url(url).await {
+                        Ok(resolved) => {
+                            info!("Successfully resolved stream URL for track {}", track.id);
+                            Some(resolved)
+                        },
+                        Err(e) => {
+                            warn!("Failed to resolve stream URL for track {}: {}", track.id, e);
+                            None
+                        }
+                    }
+                },
+                None => {
+                    warn!("No stream URL available for track {}", track.id);
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        
+        // Try to download from HLS URL
+        if let Some(url) = &hls_url {
+            let output_path = work_dir.join(format!("{}_hls.m4a", sanitized_title));
+            debug!("Downloading HLS stream to: {}", output_path.display());
+            
+            match download_stream(url, &output_path).await {
+                Ok(()) => {
+                    let file_size = match fs::metadata(&output_path) {
+                        Ok(metadata) => metadata.len(),
+                        Err(_) => 0,
+                    };
+                    
+                    info!("Successfully downloaded HLS stream: {} ({} bytes)", 
+                         output_path.display(), file_size);
+                    downloaded_files.push(("hls/aac".to_string(), output_path.to_string_lossy().to_string()));
+                },
+                Err(e) => {
+                    warn!("Failed to download HLS stream: {}", e);
+                    
+                    // If we failed to download directly, use ffmpeg with stream copy as fallback
+                    info!("Trying ffmpeg with stream copy for HLS URL");
+                    match ffmpeg_stream_copy(url, &output_path).await {
+                        Ok(()) => {
+                            let file_size = match fs::metadata(&output_path) {
+                                Ok(metadata) => metadata.len(),
+                                Err(_) => 0,
+                            };
+                            
+                            info!("Successfully saved HLS stream with ffmpeg: {} ({} bytes)", 
+                                 output_path.display(), file_size);
+                            downloaded_files.push(("hls/aac".to_string(), output_path.to_string_lossy().to_string()));
+                        },
+                        Err(e) => {
+                            warn!("Failed to save HLS stream with ffmpeg: {}", e);
+                        }
+                    }
+                }
+            }
         }
-    } else {
-        None
-    };
+        
+        // Try to download from stream URL if we don't have anything yet
+        if downloaded_files.is_empty() && stream_url.is_some() {
+            let url = stream_url.as_ref().unwrap();
+            let output_path = work_dir.join(format!("{}_stream.mp3", sanitized_title));
+            debug!("Downloading progressive stream to: {}", output_path.display());
+            
+            match download_stream(url, &output_path).await {
+                Ok(()) => {
+                    let file_size = match fs::metadata(&output_path) {
+                        Ok(metadata) => metadata.len(),
+                        Err(_) => 0,
+                    };
+                    
+                    info!("Successfully downloaded progressive stream: {} ({} bytes)", 
+                         output_path.display(), file_size);
+                    downloaded_files.push(("progressive/mp3".to_string(), output_path.to_string_lossy().to_string()));
+                },
+                Err(e) => {
+                    warn!("Failed to download progressive stream: {}", e);
+                    
+                    // If we failed to download directly, use ffmpeg with stream copy as fallback
+                    info!("Trying ffmpeg with stream copy for progressive URL");
+                    match ffmpeg_stream_copy(url, &output_path).await {
+                        Ok(()) => {
+                            let file_size = match fs::metadata(&output_path) {
+                                Ok(metadata) => metadata.len(),
+                                Err(_) => 0,
+                            };
+                            
+                            info!("Successfully saved progressive stream with ffmpeg: {} ({} bytes)", 
+                                 output_path.display(), file_size);
+                            downloaded_files.push(("progressive/mp3".to_string(), output_path.to_string_lossy().to_string()));
+                        },
+                        Err(e) => {
+                            warn!("Failed to save progressive stream with ffmpeg: {}", e);
+                        }
+                    }
+                }
+            }
+        }
+        
+        // Last resort: If we still have nothing, try transcoding as before
+        if downloaded_files.is_empty() && (hls_url.is_some() || stream_url.is_some()) {
+            warn!("Direct downloads failed, falling back to transcoding");
+            
+            // File paths for transcoded files
+            let mp3_path = work_dir.join(format!("{}.mp3", sanitized_title));
+            
+            if let Some(url) = hls_url.as_ref().or(stream_url.as_ref()) {
+                info!("Starting MP3 transcoding for track {} (fallback mode)", track.id);
+                debug!("Input URL: {}", url);
+                debug!("Output path: {}", mp3_path.display());
+                
+                match transcode_to_mp3(url, &mp3_path).await {
+                    Ok(_) => {
+                        let file_size = match fs::metadata(&mp3_path) {
+                            Ok(metadata) => metadata.len(),
+                            Err(_) => 0,
+                        };
+                        
+                        info!("Successfully transcoded to MP3 (fallback): {} ({} bytes)", 
+                             mp3_path.display(), file_size);
+                        downloaded_files.push(("transcoded/mp3".to_string(), mp3_path.to_string_lossy().to_string()));
+                    },
+                    Err(e) => {
+                        error!("Failed to transcode to MP3 (fallback): {}", e);
+                    }
+                }
+            }
+        }
+    }
     
     // Download artwork if available
     let mut artwork_result = None;
@@ -131,148 +297,215 @@ pub async fn process_track_audio(
         }
     }
     
-    // If we have neither audio stream, return error
-    if hls_url.is_none() && stream_url.is_none() && json_result.is_none() && artwork_result.is_none() {
+    // If we have no audio files, return error
+    if downloaded_files.is_empty() && json_result.is_none() && artwork_result.is_none() {
         error!("No valid audio URLs or data found for track {}", track.id);
         cleanup_temp_dir(&work_dir).await?;
         return Err("No valid audio URLs or data found for track".into());
     }
     
-    // File paths for transcoded files
-    let mp3_path = work_dir.join(format!("{}.mp3", sanitized_title));
-    let ogg_path = work_dir.join(format!("{}.ogg", sanitized_title));
+    // Sort files by preference for primary/secondary output
+    downloaded_files.sort_by(|(format_a, _), (format_b, _)| {
+        // Prioritize formats based on quality/preference
+        let priority_a = get_format_priority(format_a);
+        let priority_b = get_format_priority(format_b);
+        priority_a.cmp(&priority_b)
+    });
     
-    debug!("Output file paths: MP3={}, OGG={}", mp3_path.display(), ogg_path.display());
-    
-    // Try to transcode to both formats
-    let mut mp3_result = None;
-    let mut ogg_result = None;
-    
-    // Process MP3 and OGG in parallel (if possible)
-    if let (Some(mp3_url), Some(ogg_url)) = (hls_url.as_ref().or(stream_url.as_ref()), hls_url.as_ref()) {
-        info!("Starting parallel MP3 and OGG transcoding for track {}", track.id);
-        
-        // Create tasks for both conversions
-        let mp3_path_clone = mp3_path.clone();
-        let ogg_path_clone = ogg_path.clone();
-        let mp3_url_clone = mp3_url.clone();
-        let ogg_url_clone = ogg_url.clone();
-        
-        // Spawn tasks for parallel processing
-        let mp3_task = tokio::spawn(async move {
-            debug!("MP3 transcoding task started");
-            match transcode_to_mp3(&mp3_url_clone, &mp3_path_clone).await {
-                Ok(_) => {
-                    let file_size = match fs::metadata(&mp3_path_clone) {
-                        Ok(metadata) => metadata.len(),
-                        Err(_) => 0,
-                    };
-                    
-                    info!("Successfully transcoded to MP3: {} ({} bytes)", mp3_path_clone.display(), file_size);
-                    Some(mp3_path_clone.to_string_lossy().to_string())
-                },
-                Err(e) => {
-                    error!("Failed to transcode to MP3: {}", e);
-                    None
-                }
-            }
-        });
-        
-        let ogg_task = tokio::spawn(async move {
-            debug!("OGG transcoding task started");
-            match transcode_to_ogg(&ogg_url_clone, &ogg_path_clone).await {
-                Ok(_) => {
-                    let file_size = match fs::metadata(&ogg_path_clone) {
-                        Ok(metadata) => metadata.len(),
-                        Err(_) => 0,
-                    };
-                    
-                    info!("Successfully transcoded to OGG: {} ({} bytes)", ogg_path_clone.display(), file_size);
-                    Some(ogg_path_clone.to_string_lossy().to_string())
-                },
-                Err(e) => {
-                    error!("Failed to transcode to OGG: {}", e);
-                    None
-                }
-            }
-        });
-        
-        // Wait for both tasks to complete
-        match tokio::try_join!(mp3_task, ogg_task) {
-            Ok((mp3_res, ogg_res)) => {
-                mp3_result = mp3_res;
-                ogg_result = ogg_res;
-                debug!("Parallel transcoding completed - MP3: {}, OGG: {}", 
-                      mp3_result.is_some(), ogg_result.is_some());
-            },
-            Err(e) => {
-                error!("Error in parallel transcoding tasks: {}", e);
-                // Continue with any successful results from individual tasks
-            }
-        }
-    } else {
-        // Fall back to sequential processing if we don't have both URL types
-        // Process MP3 (preferring HLS if available)
-        if let Some(url) = hls_url.as_ref().or(stream_url.as_ref()) {
-            info!("Starting MP3 transcoding for track {}", track.id);
-            debug!("Input URL: {}", url);
-            debug!("Output path: {}", mp3_path.display());
-            
-            match transcode_to_mp3(url, &mp3_path).await {
-                Ok(_) => {
-                    let file_size = match fs::metadata(&mp3_path) {
-                        Ok(metadata) => metadata.len(),
-                        Err(_) => 0,
-                    };
-                    
-                    mp3_result = Some(mp3_path.to_string_lossy().to_string());
-                    info!("Successfully transcoded to MP3: {} ({} bytes)", mp3_path.display(), file_size);
-                },
-                Err(e) => {
-                    error!("Failed to transcode to MP3: {}", e);
-                }
-            }
-        } else {
-            warn!("No URL available for MP3 transcoding");
-        }
-        
-        // Process OGG (only from HLS for better quality)
-        if let Some(url) = &hls_url {
-            info!("Starting OGG transcoding for track {}", track.id);
-            debug!("Input URL: {}", url);
-            debug!("Output path: {}", ogg_path.display());
-            
-            match transcode_to_ogg(url, &ogg_path).await {
-                Ok(_) => {
-                    let file_size = match fs::metadata(&ogg_path) {
-                        Ok(metadata) => metadata.len(),
-                        Err(_) => 0,
-                    };
-                    
-                    ogg_result = Some(ogg_path.to_string_lossy().to_string());
-                    info!("Successfully transcoded to OGG: {} ({} bytes)", ogg_path.display(), file_size);
-                },
-                Err(e) => {
-                    error!("Failed to transcode to OGG: {}", e);
-                }
-            }
-        } else {
-            warn!("No HLS URL available for OGG transcoding");
-        }
-    }
-    
-    // If everything failed, return error
-    if mp3_result.is_none() && ogg_result.is_none() && artwork_result.is_none() && json_result.is_none() {
-        error!("All processing attempts failed for track {}", track.id);
-        cleanup_temp_dir(&work_dir).await?;
-        return Err("Failed to process track".into());
-    }
+    // Return the primary and secondary files if available
+    let primary_file = downloaded_files.get(0).map(|(_, path)| path.clone());
+    let secondary_file = downloaded_files.get(1).map(|(_, path)| path.clone());
     
     info!("Processing completed for track '{}' (ID: {})", track.title, track.id);
-    Ok((mp3_result, ogg_result, artwork_result, json_result))
+    debug!("Primary file: {:?}, Secondary file: {:?}", primary_file, secondary_file);
+    
+    Ok((primary_file, secondary_file, artwork_result, json_result))
 }
 
-/// Transcode a URL to MP3 using ffmpeg
+/// Extract all available streaming formats from track data
+fn extract_available_formats(track: &Track) -> Vec<(String, String)> {
+    let mut formats = Vec::new();
+    
+    if let Some(raw_data) = &track.raw_data {
+        if let Some(media) = raw_data.get("media") {
+            if let Some(transcodings) = media.get("transcodings").and_then(Value::as_array) {
+                for transcoding in transcodings {
+                    // Get format info
+                    let mime_type = transcoding.get("format")
+                        .and_then(|f| f.get("mime_type"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    
+                    let protocol = transcoding.get("format")
+                        .and_then(|f| f.get("protocol"))
+                        .and_then(Value::as_str)
+                        .unwrap_or("unknown");
+                    
+                    let quality = transcoding.get("quality")
+                        .and_then(Value::as_str)
+                        .unwrap_or("sq");
+                    
+                    let format_string = format!("{}/{}/{}", protocol, mime_type, quality);
+                    
+                    // Get URL
+                    if let Some(url) = transcoding.get("url").and_then(Value::as_str) {
+                        debug!("Found format: {} at URL: {}", format_string, url);
+                        formats.push((format_string, url.to_string()));
+                    }
+                }
+            }
+        }
+    }
+    
+    formats
+}
+
+/// Determine file extension based on format info
+fn determine_extension_from_format(format_info: &str) -> String {
+    if format_info.contains("audio/mpeg") {
+        "mp3".to_string()
+    } else if format_info.contains("audio/ogg") {
+        if format_info.contains("codecs=\"opus\"") {
+            "opus".to_string()
+        } else {
+            "ogg".to_string()
+        }
+    } else if format_info.contains("audio/mp4") || format_info.contains("aac") {
+        "m4a".to_string()
+    } else if format_info.contains("audio/x-wav") {
+        "wav".to_string()
+    } else if format_info.contains("flac") {
+        "flac".to_string()
+    } else if format_info.contains("hls") {
+        "m4a".to_string()  // HLS usually contains AAC in MP4 container
+    } else {
+        // Default fallback
+        "audio".to_string()
+    }
+}
+
+/// Sanitize format string for use in filenames
+fn sanitize_format_string(format_info: &str) -> String {
+    // Replace characters that are problematic in filenames
+    let sanitized = format_info
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace(":", "-")
+        .replace("*", "")
+        .replace("?", "")
+        .replace("\"", "")
+        .replace("<", "")
+        .replace(">", "")
+        .replace("|", "_")
+        .replace(";", "_")
+        .replace("=", "_")
+        .replace(",", "_")
+        .replace(" ", "_")
+        .replace("codecs=", "")
+        .replace("mp4a.40.2", "aac")
+        .replace(".", "_");
+    
+    // Truncate if too long
+    if sanitized.len() > 50 {
+        sanitized.chars().take(50).collect()
+    } else {
+        sanitized
+    }
+}
+
+/// Get priority for format sorting (lower number = higher priority)
+fn get_format_priority(format_info: &str) -> i32 {
+    if format_info.contains("hq") {
+        // High quality gets priority
+        if format_info.contains("flac") {
+            1  // FLAC HQ (rare)
+        } else if format_info.contains("opus") {
+            2  // Opus HQ
+        } else if format_info.contains("mp3") {
+            3  // MP3 HQ
+        } else if format_info.contains("aac") || format_info.contains("mp4") {
+            4  // AAC HQ
+        } else {
+            5  // Other HQ
+        }
+    } else {
+        // Regular quality
+        if format_info.contains("progressive") && format_info.contains("mp3") {
+            10  // Progressive MP3 (common format)
+        } else if format_info.contains("opus") {
+            11  // Opus standard quality
+        } else if format_info.contains("mp3") {
+            12  // MP3 standard quality
+        } else if format_info.contains("aac") || format_info.contains("mp4") || format_info.contains("hls") {
+            13  // AAC standard quality or HLS
+        } else if format_info.contains("transcoded") {
+            50  // Fallback transcoded files (lowest priority)
+        } else {
+            20  // Other formats
+        }
+    }
+}
+
+/// Download a stream directly
+async fn download_stream(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    debug!("Downloading stream from URL to {}", output_path.display());
+    
+    // Create reqwest client
+    let client = &HTTP_CLIENT;
+    
+    // Set up headers
+    let mut headers = HeaderMap::new();
+    headers.insert("User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36".parse()?);
+    
+    // Download the stream
+    let response = client.get(url)
+        .headers(headers)
+        .send()
+        .await?;
+    
+    if !response.status().is_success() {
+        return Err(format!("Failed to download stream: HTTP {}", response.status()).into());
+    }
+    
+    // Get the stream data
+    let stream_data = response.bytes().await?;
+    
+    // Save to file
+    let mut file = TokioFile::create(output_path).await?;
+    file.write_all(&stream_data).await?;
+    
+    debug!("Stream downloaded successfully to {}", output_path.display());
+    Ok(())
+}
+
+/// Use ffmpeg to copy the stream without transcoding
+async fn ffmpeg_stream_copy(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    debug!("Executing ffmpeg stream copy command");
+    let mut cmd = TokioCommand::new("ffmpeg");
+    cmd.arg("-i")
+        .arg(url)
+        .arg("-c")
+        .arg("copy")  // Copy the stream without re-encoding
+        .arg("-y")  // Overwrite output
+        .arg(output_path);
+    
+    // Log command (without full URL for privacy/security)
+    debug!("ffmpeg command: -i [url] -c copy -y {}", 
+          output_path.display());
+    
+    // Execute command
+    let status = cmd.status().await?;
+    
+    if !status.success() {
+        error!("ffmpeg stream copy failed with exit code: {}", status);
+        return Err(format!("ffmpeg failed with exit code: {}", status).into());
+    }
+    
+    debug!("ffmpeg stream copy completed successfully");
+    Ok(())
+}
+
+/// Transcode a URL to MP3 using ffmpeg (fallback method)
 async fn transcode_to_mp3(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     debug!("Executing ffmpeg MP3 transcoding command");
     let mut cmd = TokioCommand::new("ffmpeg");
@@ -298,35 +531,6 @@ async fn transcode_to_mp3(url: &str, output_path: &Path) -> Result<(), Box<dyn s
     }
     
     debug!("ffmpeg MP3 transcoding completed successfully");
-    Ok(())
-}
-
-/// Transcode a URL to OGG/Opus using ffmpeg
-async fn transcode_to_ogg(url: &str, output_path: &Path) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-    debug!("Executing ffmpeg OGG/Opus transcoding command");
-    let mut cmd = TokioCommand::new("ffmpeg");
-    cmd.arg("-i")
-        .arg(url)
-        .arg("-c:a")
-        .arg("libopus")
-        .arg("-b:a")
-        .arg("128k") // Good quality for opus
-        .arg("-y") // Overwrite output
-        .arg(output_path);
-    
-    // Log command (without full URL for privacy/security)
-    debug!("ffmpeg command: -i [url] -c:a libopus -b:a 128k -y {}", 
-          output_path.display());
-    
-    // Execute command
-    let status = cmd.status().await?;
-    
-    if !status.success() {
-        error!("ffmpeg OGG transcoding failed with exit code: {}", status);
-        return Err(format!("ffmpeg failed with exit code: {}", status).into());
-    }
-    
-    debug!("ffmpeg OGG transcoding completed successfully");
     Ok(())
 }
 
