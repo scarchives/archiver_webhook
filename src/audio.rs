@@ -484,7 +484,8 @@ async fn ffmpeg_stream_copy(url: &str, output_path: &Path) -> Result<(), Box<dyn
         .arg(url)
         .arg("-c")
         .arg("copy")  // Copy the stream without re-encoding
-        .arg("-y");  // Overwrite output
+        .arg("-y")  // Overwrite output
+        .kill_on_drop(true);  // Ensure process is killed if parent process exits
     
     // Configure stdout/stderr redirection based on config
     if !show_output {
@@ -513,7 +514,8 @@ async fn ffmpeg_stream_copy(url: &str, output_path: &Path) -> Result<(), Box<dyn
         let mut cmd2 = TokioCommand::new("ffmpeg");
         cmd2.arg("-i")
             .arg(url)
-            .arg("-y");  // Overwrite output
+            .arg("-y")  // Overwrite output
+            .kill_on_drop(true);  // Ensure process is killed if parent process exits
         
         // Configure stdout/stderr redirection based on config
         if !show_output {
@@ -556,7 +558,8 @@ async fn transcode_to_mp3(url: &str, output_path: &Path) -> Result<(), Box<dyn s
         .arg("libmp3lame")
         .arg("-q:a")
         .arg("2") // High quality (0-9, lower is better)
-        .arg("-y"); // Overwrite output
+        .arg("-y") // Overwrite output
+        .kill_on_drop(true); // Ensure process is killed if parent process exits
     
     // Configure stdout/stderr redirection based on config
     if !show_output {

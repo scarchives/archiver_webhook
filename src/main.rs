@@ -551,24 +551,47 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
         #[cfg(not(unix))]
         let should_shutdown = tokio::select! {
             _ = interval.tick() => false,
-            _ = tokio::signal::ctrl_c() => {
-                info!("Received Ctrl+C signal");
-                true
+            result = tokio::signal::ctrl_c() => {
+                match result {
+                    Ok(()) => {
+                        info!("Received Ctrl+C signal");
+                        // Give some breathing room for signal handling
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                        true
+                    },
+                    Err(e) => {
+                        error!("Error handling Ctrl+C signal: {}", e);
+                        true
+                    }
+                }
             },
         };
         
         if should_shutdown {
             info!("Shutdown signal received, performing clean shutdown");
             
-            // Save the database
-            {
-                let db_guard = db.lock().await;
-                if let Err(e) = db_guard.shutdown() {
-                    error!("Error during database shutdown: {}", e);
+            // Set a reasonable timeout for shutdown operations
+            let shutdown_timeout = Duration::from_secs(5);
+            
+            // Create a timeout for the shutdown process
+            let shutdown_result = tokio::time::timeout(shutdown_timeout, async {
+                // Save the database
+                {
+                    let db_guard = db.lock().await;
+                    if let Err(e) = db_guard.shutdown() {
+                        error!("Error during database shutdown: {}", e);
+                    }
                 }
+                
+                // Small delay to ensure all resources are freed
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }).await;
+            
+            match shutdown_result {
+                Ok(_) => info!("Application shutdown completed successfully"),
+                Err(_) => warn!("Application shutdown timed out after {} seconds", shutdown_timeout.as_secs()),
             }
             
-            info!("Application shutdown complete");
             break;
         }
         
