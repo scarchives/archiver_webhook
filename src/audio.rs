@@ -73,35 +73,28 @@ pub async fn process_track_audio(
     for (format_info, url) in available_formats {
         debug!("Attempting to download format: {} at {}", format_info, url);
         
-        // Resolve the stream URL
-        match get_stream_url(&url).await {
-            Ok(resolved_url) => {
-                // Determine file extension based on format info
-                let extension = determine_extension_from_format(&format_info);
-                let safe_format = sanitize_format_string(&format_info);
-                let output_path = work_dir.join(format!("{}_{}.{}", sanitized_title, safe_format, extension));
+        // Determine file extension based on format info
+        let extension = determine_extension_from_format(&format_info);
+        let safe_format = sanitize_format_string(&format_info);
+        let output_path = work_dir.join(format!("{}_{}.{}", sanitized_title, safe_format, extension));
+        
+        debug!("Downloading stream to: {}", output_path.display());
+        
+        // Use the new resolve_and_download_format function
+        match resolve_and_download_format(&format_info, &url, &output_path).await {
+            Ok(()) => {
+                let file_size = match fs::metadata(&output_path) {
+                    Ok(metadata) => metadata.len(),
+                    Err(_) => 0,
+                };
                 
-                debug!("Downloading stream to: {}", output_path.display());
-                
-                // Download the stream directly
-                match download_stream(&resolved_url, &output_path).await {
-                    Ok(()) => {
-                        let file_size = match fs::metadata(&output_path) {
-                            Ok(metadata) => metadata.len(),
-                            Err(_) => 0,
-                        };
-                        
-                        info!("Successfully downloaded {} format: {} ({} bytes)", 
-                              format_info, output_path.display(), file_size);
-                        downloaded_files.push((format_info, output_path.to_string_lossy().to_string()));
-                    },
-                    Err(e) => {
-                        warn!("Failed to download {} format: {}", format_info, e);
-                    }
-                }
+                info!("Successfully downloaded {} format: {} ({} bytes)", 
+                      format_info, output_path.display(), file_size);
+                downloaded_files.push((format_info, output_path.to_string_lossy().to_string()));
             },
             Err(e) => {
-                warn!("Failed to resolve URL for {} format: {}", format_info, e);
+                warn!("Failed to download {} format: {}", format_info, e);
+                // Continue to next format
             }
         }
     }
@@ -328,6 +321,8 @@ fn extract_available_formats(track: &Track) -> Vec<(String, String)> {
     if let Some(raw_data) = &track.raw_data {
         if let Some(media) = raw_data.get("media") {
             if let Some(transcodings) = media.get("transcodings").and_then(Value::as_array) {
+                debug!("Found {} total transcodings for track {}", transcodings.len(), track.id);
+                
                 for transcoding in transcodings {
                     // Get format info
                     let mime_type = transcoding.get("format")
@@ -344,9 +339,15 @@ fn extract_available_formats(track: &Track) -> Vec<(String, String)> {
                         .and_then(Value::as_str)
                         .unwrap_or("sq");
                     
-                    // Only use progressive streams for direct download
-                    // HLS streams need special handling
+                    // Format string with additional info to help debugging
                     let format_string = format!("{}/{}/{}", protocol, mime_type, quality);
+                    
+                    // Skip certain formats that are known to cause issues
+                    if format_string.contains("audio/mpegurl") && protocol == "hls" {
+                        // This is an old/deprecated format specification that often 404s
+                        debug!("Skipping known problematic format: {}", format_string);
+                        continue;
+                    }
                     
                     // Get URL
                     if let Some(url) = transcoding.get("url").and_then(Value::as_str) {
@@ -364,6 +365,12 @@ fn extract_available_formats(track: &Track) -> Vec<(String, String)> {
         let priority_b = get_format_priority(format_b);
         priority_a.cmp(&priority_b)
     });
+    
+    debug!("Sorted formats by priority: {}", 
+           formats.iter()
+                 .map(|(fmt, _)| fmt.as_str())
+                 .collect::<Vec<&str>>()
+                 .join(", "));
     
     formats
 }
@@ -444,8 +451,10 @@ fn get_format_priority(format_info: &str) -> i32 {
             11  // Opus standard quality
         } else if format_info.contains("mp3") {
             12  // MP3 standard quality
-        } else if format_info.contains("aac") || format_info.contains("mp4") || format_info.contains("hls") {
-            13  // AAC standard quality or HLS
+        } else if format_info.contains("aac") || format_info.contains("mp4") {
+            13  // AAC standard quality
+        } else if format_info.contains("hls") {
+            15  // HLS (can contain various formats, often AAC)
         } else if format_info.contains("transcoded") {
             50  // Fallback transcoded files (lowest priority)
         } else {
@@ -687,6 +696,55 @@ async fn save_track_json(track: &Track, output_path: &Path) -> Result<(), Box<dy
     
     debug!("Track data JSON saved successfully");
     Ok(())
+}
+
+/// Resolve the stream URL
+async fn resolve_and_download_format(
+    format_info: &str, 
+    url: &str, 
+    output_path: &Path
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    debug!("Resolving and downloading format: {}", format_info);
+    
+    match get_stream_url(url).await {
+        Ok(resolved_url) => {
+            // Download the stream
+            match download_stream(&resolved_url, output_path).await {
+                Ok(()) => {
+                    // Check if file is large enough to be a valid audio file
+                    let file_size = match fs::metadata(output_path) {
+                        Ok(metadata) => metadata.len(),
+                        Err(_) => 0,
+                    };
+                    
+                    if file_size < 1024 { // Less than 1KB is suspicious
+                        return Err(format!("Downloaded file too small ({} bytes)", file_size).into());
+                    }
+                    
+                    debug!("Successfully downloaded {} format: {} bytes", format_info, file_size);
+                    Ok(())
+                },
+                Err(e) => Err(e)
+            }
+        },
+        Err(e) => {
+            // Check for specific error types to handle appropriately
+            let err_string = e.to_string();
+            
+            if err_string.contains("HTTP error 401") || err_string.contains("HTTP error 403") {
+                // Authentication errors - this is likely a premium-only format
+                warn!("Format {} requires authentication (premium only)", format_info);
+                return Err(format!("Authentication required for {}", format_info).into());
+            } else if err_string.contains("HTTP error 404") {
+                // Resource not found
+                warn!("Format {} returned 404 Not Found", format_info);
+                return Err(format!("Resource not found for {}", format_info).into());
+            }
+            
+            // General error
+            Err(e)
+        }
+    }
 }
 
 // Add a lazy_static HTTP client
