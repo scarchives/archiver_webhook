@@ -238,13 +238,22 @@ Defaults can be accepted by pressing Enter for each prompt.
 
 # Logging
 
-Logging is now controlled by the `log_level` field in your `config.json`.
+Logging is controlled by the `log_level` field in your `config.json`.
 Valid values: `trace`, `debug`, `info`, `warn`, `error` (default: `info`).
 
-Example:
+The application provides:
+- Console output with colored log levels
+- File logging to `latest.log` (or custom path specified in config)
+- Windows-specific console title updates showing current stats:
+  ```
+  SCArchive Webhook | Tracks: 123456 | New: 500 | Errors: 14
+  ```
+
+Example config:
 ```json
 {
   "log_level": "debug",
+  "log_file": "latest.log",
   ...
 }
 ```

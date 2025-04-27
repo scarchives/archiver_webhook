@@ -68,6 +68,7 @@ dependencies = [
  "simple_logger",
  "tokio",
  "uuid",
+ "winapi",
 ]
 
 [[package]]

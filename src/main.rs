@@ -7,12 +7,14 @@ use log::{info, warn, error, debug};
 use tokio::sync::Mutex;
 use simple_logger;
 use log::LevelFilter;
+use crate::loghandler::{increment_total_tracks, increment_new_tracks, increment_error_count};
 
 mod audio;
 mod config;
 mod db;
 mod discord;
 mod soundcloud;
+mod loghandler;
 
 use config::{Config, Users};
 use db::TrackDatabase;
@@ -639,9 +641,13 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
                 
                 let task = tokio::spawn(async move {
                     match poll_user(&config, &user_id, &db).await {
-                        Ok(count) => (user_id, Ok(count)),
+                        Ok(count) => {
+                            increment_new_tracks(count as u64);
+                            (user_id, Ok(count))
+                        },
                         Err(e) => {
                             error!("Error polling user {}: {}", user_id, e);
+                            increment_error_count();
                             (user_id, Err(e))
                         }
                     }
@@ -665,6 +671,7 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
                     },
                     Err(e) => {
                         error!("Task join error: {}", e);
+                        increment_error_count();
                     }
                 }
             }
@@ -767,11 +774,14 @@ async fn poll_user(
     // Update database
     let new_track_ids = {
         let mut db_guard = db.lock().await;
-        // Use the new add_tracks_and_save method to ensure immediate persistence
         match db_guard.add_tracks_and_save(&track_ids) {
-            Ok(new_ids) => new_ids,
+            Ok(new_ids) => {
+                increment_total_tracks(new_ids.len() as u64);
+                new_ids
+            },
             Err(e) => {
                 error!("Error adding and saving tracks: {}", e);
+                increment_error_count();
                 return Err(e.into());
             }
         }
