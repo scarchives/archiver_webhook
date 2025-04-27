@@ -520,20 +520,18 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
     // Start main polling loop
     info!("Starting polling loop with interval of {} seconds", config.poll_interval_sec);
     
-    // Track stats
+    // Initialize counters
     let mut total_polls = 0;
-    let total_new_tracks_overall = 0;
-    let mut last_stats_time = std::time::Instant::now();
-    
-    // Counter for auto follow checking
     let mut follow_check_counter = 0;
-    
-    // Counter for database saving
     let mut db_save_counter = 0;
+    let mut tracks_since_last_save = 0;
     let mut db_needs_saving = false;
-    
-    // Main loop with graceful shutdown support
+
+    // Main polling loop
     loop {
+        total_polls += 1;
+        info!("Starting poll #{}", total_polls);
+        
         // Wait for either the next tick or a shutdown signal
         #[cfg(unix)]
         let should_shutdown = tokio::select! {
@@ -595,18 +593,6 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
             break;
         }
         
-        total_polls += 1;
-        
-        // Log periodic stats (every hour)
-        let now = std::time::Instant::now();
-        if now.duration_since(last_stats_time).as_secs() > 3600 {
-            info!("Stats: {} polls completed, {} new tracks found", 
-                 total_polls, total_new_tracks_overall);
-            last_stats_time = now;
-        }
-        
-        debug!("Poll #{}: Checking for new tracks", total_polls);
-        
         // Check if it's time to update followings
         if config.auto_follow_source.is_some() {
             follow_check_counter += 1;
@@ -638,33 +624,22 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
         let mut users_processed = 0;
         let mut total_new_tracks = 0;
         
-        // Track new tracks since last save for the per-track save feature
-        let mut tracks_since_last_save = 0;
-
+        // Process users in batches
         while users_processed < users_vec.len() {
-            let batch_size = std::cmp::min(
-                config.max_parallel_fetches,
-                users_vec.len() - users_processed
-            );
+            let batch_size = std::cmp::min(config.max_parallel_fetches, users_vec.len() - users_processed);
+            let batch = &users_vec[users_processed..users_processed + batch_size];
             
-            let mut tasks = Vec::with_capacity(batch_size);
+            let mut tasks = Vec::new();
             
-            // Create tasks for this batch
-            for i in 0..batch_size {
-                let user_id = users_vec[users_processed + i].clone();
-                let config_clone = config.clone();
-                let db_clone = db.clone();
+            // Create tasks for each user in the batch
+            for user_id in batch {
+                let config = config.clone();
+                let user_id = user_id.clone();
+                let db = db.clone();
                 
                 let task = tokio::spawn(async move {
-                    match poll_user(&config_clone, &user_id, &db_clone).await {
-                        Ok(new_count) => {
-                            if new_count > 0 {
-                                info!("Found {} new tracks for user {}", new_count, user_id);
-                            } else {
-                                debug!("No new tracks for user {}", user_id);
-                            }
-                            (user_id, Ok(new_count))
-                        }
+                    match poll_user(&config, &user_id, &db).await {
+                        Ok(count) => (user_id, Ok(count)),
                         Err(e) => {
                             error!("Error polling user {}: {}", user_id, e);
                             (user_id, Err(e))
@@ -675,7 +650,7 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
                 tasks.push(task);
             }
             
-            // Wait for all tasks in this batch to complete
+            // Wait for all tasks in the batch to complete
             for task in tasks {
                 match task.await {
                     Ok((_user_id, Ok(count))) => {
@@ -715,15 +690,15 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
                        config.db_save_interval, db_save_counter)
             };
             
-            debug!("Saving database: {}", save_reason);
+            info!("Saving database: {}", save_reason);
             
-            {
-                let db_guard = db.lock().await;
-                if let Err(e) = db_guard.save() {
-                    warn!("Failed to save tracks database: {}", e);
-                } else {
-                    debug!("Database saved successfully ({})", save_reason);
-                }
+            // Hold the mutex lock for the entire save operation
+            let mut db_guard = db.lock().await;
+            if let Err(e) = db_guard.save() {
+                error!("Failed to save tracks database: {}", e);
+            } else {
+                info!("Database saved successfully with {} tracks ({})", 
+                     db_guard.get_all_tracks().len(), save_reason);
             }
             
             // Reset the counter and flag
@@ -737,6 +712,9 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
         } else {
             debug!("Poll #{} completed: no new tracks", total_polls);
         }
+        
+        // Sleep until next poll
+        tokio::time::sleep(std::time::Duration::from_secs(config.poll_interval_sec)).await;
     }
     
     Ok(())
