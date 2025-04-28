@@ -13,6 +13,5 @@ regex = "1.11.1"
 lazy_static = "1.5.0"
 uuid = { version = "1.16.0", features = ["v4"] }
 simple_logger = "5.0.0"
-log4rs = "1.2"
 chrono = "0.4"
 winapi = { version = "0.3", features = ["wincon"] }

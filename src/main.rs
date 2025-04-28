@@ -5,9 +5,9 @@ use std::env;
 use std::io::{self, Write, BufRead};
 use log::{info, warn, error, debug};
 use tokio::sync::Mutex;
-use simple_logger;
 use log::LevelFilter;
-use crate::loghandler::{increment_total_tracks, increment_new_tracks, increment_error_count};
+use crate::loghandler::{increment_total_tracks, increment_new_tracks, increment_error_count, setup_logging};
+use tokio::sync::Semaphore;
 
 mod audio;
 mod config;
@@ -86,40 +86,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
 /// Setup logger with appropriate configuration
 fn setup_logger() {
-    // Load config to get log level if available
+    // Load config and initialize logging (console + file + console title updater)
     let config_path = "config.json";
-    let log_level = match std::fs::File::open(config_path) {
-        Ok(file) => {
-            let reader = std::io::BufReader::new(file);
-            match serde_json::from_reader::<_, serde_json::Value>(reader) {
-                Ok(config) => {
-                    // Extract log level from config
-                    config.get("log_level")
-                        .and_then(|l| l.as_str())
-                        .unwrap_or("info")
-                        .to_string()
-                },
-                Err(_) => "info".to_string()
-            }
-        },
-        Err(_) => "info".to_string()
-    };
-    
-    // Parse log level string to LevelFilter
-    let level_filter = match log_level.to_lowercase().as_str() {
-        "trace" => LevelFilter::Trace,
-        "debug" => LevelFilter::Debug,
-        "info" => LevelFilter::Info,
-        "warn" => LevelFilter::Warn,
-        "error" => LevelFilter::Error,
-        _ => LevelFilter::Info,
-    };
-    
-    // Initialize logger with the configured level
-    if let Err(e) = simple_logger::SimpleLogger::new()
-        .with_level(level_filter)
-        .init() {
-        eprintln!("Failed to initialize logger: {}", e);
+    if let Ok(cfg) = Config::load(config_path) {
+        if let Err(e) = setup_logging(&cfg.log_file, &cfg.log_level) {
+            eprintln!("Failed to initialize logger: {}", e);
+        }
+    } else {
+        // Fallback to defaults
+        if let Err(e) = setup_logging("latest.log", "info") {
+            eprintln!("Failed to initialize logger: {}", e);
+        }
     }
 }
 
@@ -632,6 +609,8 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
             let batch = &users_vec[users_processed..users_processed + batch_size];
             
             let mut tasks = Vec::new();
+            let semaphore = Arc::new(Semaphore::new(config.max_concurrent_processing));
+            let successful_tracks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
             
             // Create tasks for each user in the batch
             for user_id in batch {
@@ -771,20 +750,13 @@ async fn poll_user(
     // Check which tracks are new
     let track_ids: Vec<String> = all_tracks.iter().map(|t| t.id.clone()).collect();
     
-    // Update database
+    // Get new tracks without adding to database yet
     let new_track_ids = {
         let mut db_guard = db.lock().await;
-        match db_guard.add_tracks_and_save(&track_ids) {
-            Ok(new_ids) => {
-                increment_total_tracks(new_ids.len() as u64);
-                new_ids
-            },
-            Err(e) => {
-                error!("Error adding and saving tracks: {}", e);
-                increment_error_count();
-                return Err(e.into());
-            }
-        }
+        track_ids.iter()
+            .filter(|id| !db_guard.has_track(id))
+            .cloned()
+            .collect::<Vec<String>>()
     };
     
     if new_track_ids.is_empty() {
@@ -797,6 +769,7 @@ async fn poll_user(
     let processing_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent_processing));
     
     let mut tasks = Vec::new();
+    let mut successful_tracks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
     
     for track_id in &new_track_ids {
         // Find the track in our collection
@@ -808,18 +781,19 @@ async fn poll_user(
             }
         };
         
-        let semaphore_clone = processing_semaphore.clone();
-        let webhook_url = config.discord_webhook_url.clone();
-        let temp_dir = config.temp_dir.clone();
+        let semaphore = Arc::clone(&processing_semaphore);
+        let successful_tracks = Arc::clone(&successful_tracks);
         
         // Spawn a task to process this track
+        let webhook_url = config.discord_webhook_url.clone();
+        let temp_dir = config.temp_dir.clone();
         let task = tokio::spawn(async move {
             // Acquire semaphore to limit concurrent ffmpeg processes
-            let _permit = match semaphore_clone.acquire().await {
+            let _permit = match semaphore.acquire().await {
                 Ok(permit) => permit,
                 Err(e) => {
                     error!("Failed to acquire semaphore for track {}: {}", track.id, e);
-                    return false;
+                    return;
                 }
             };
             
@@ -830,7 +804,7 @@ async fn poll_user(
                 Ok(t) => t,
                 Err(e) => {
                     error!("Failed to get track details for {}: {}", track.id, e);
-                    return false;
+                    return;
                 }
             };
             
@@ -892,11 +866,13 @@ async fn poll_user(
                 Ok(_) => {
                     info!("Successfully sent webhook for track: {} by {}", 
                           track_details.title, track_details.user.username);
+                    let mut tracks = successful_tracks.lock().await;
+                    tracks.push(track.id.clone());
                 },
                 Err(e) => {
                     error!("Failed to send webhook for track {}: {}", track.id, e);
                 }
-            }
+            };
             
             // Clean up temp files
             for (path, _) in processing_result.clone() {
@@ -904,8 +880,6 @@ async fn poll_user(
                     warn!("Failed to clean up temp file {}: {}", path, e);
                 }
             }
-            
-            true // Indicate success
         });
         
         tasks.push(task);
@@ -916,14 +890,24 @@ async fn poll_user(
     
     for task in tasks {
         match task.await {
-            Ok(success) => {
-                if success {
-                    new_tracks_processed += 1;
-                }
+            Ok(()) => {
+                new_tracks_processed += 1;
             },
             Err(e) => {
                 error!("Error in track processing task: {}", e);
+                increment_error_count();
             }
+        }
+    }
+    
+    // Add successful tracks to database
+    let successful_tracks = successful_tracks.lock().await;
+    if !successful_tracks.is_empty() {
+        let mut db_guard = db.lock().await;
+        if let Err(e) = db_guard.add_tracks_and_save(&successful_tracks) {
+            error!("Failed to add successful tracks to database: {}", e);
+        } else {
+            increment_total_tracks(successful_tracks.len() as u64);
         }
     }
     
