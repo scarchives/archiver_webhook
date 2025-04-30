@@ -10,6 +10,25 @@ static TOTAL_TRACKS: AtomicU64 = AtomicU64::new(0);
 static NEW_TRACKS: AtomicU64 = AtomicU64::new(0);
 static ERROR_COUNT: AtomicU32 = AtomicU32::new(0);
 
+/// Update the log level at runtime
+pub fn update_log_level(level_str: &str) {
+    let level_filter = match level_str.to_lowercase().as_str() {
+        "trace" => LevelFilter::Trace,
+        "debug" => LevelFilter::Debug,
+        "info" => LevelFilter::Info,
+        "warn" => LevelFilter::Warn,
+        "error" => LevelFilter::Error,
+        _ => {
+            warn!("Invalid log level '{}', defaulting to info", level_str);
+            LevelFilter::Info
+        }
+    };
+    
+    // Set the log level
+    log::set_max_level(level_filter);
+    info!("Log level set to {}", level_str);
+}
+
 /// Update the console title with current stats
 pub fn update_console_title() {
     #[cfg(windows)]
