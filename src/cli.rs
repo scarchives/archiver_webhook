@@ -1,5 +1,6 @@
 use std::io::{self, Write, BufRead};
 use log::{info, warn, error, debug};
+use std::sync::Arc;
 
 use crate::config::{Config, Users};
 use crate::db::TrackDatabase;
@@ -187,11 +188,15 @@ pub async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error
         }
     }
     
+    // Create Discord semaphore
+    let discord_semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_discord_parallelism));
+    
     // Use our modularized function to process and post the track
     let result = match soundcloud::process_and_post_track(
         id_or_url, 
         &config.discord_webhook_url, 
-        config.temp_dir.as_deref()
+        config.temp_dir.as_deref(),
+        Some(&discord_semaphore)
     ).await {
         Ok((track_id, user_id, webhook_response)) => {
             // Store the Discord message ID in the database
@@ -359,8 +364,19 @@ pub async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error 
         Some(temp_dir)
     };
     
-    println!("\nEnter maximum parallel user fetches [4]: ");
-    let max_parallel_fetches = read_line_with_default("4")
+    println!("\nEnter maximum parallel SoundCloud API requests [2]: ");
+    println!("(Keep this low - 1 or 2 recommended to avoid rate limiting)");
+    let max_soundcloud_parallelism = read_line_with_default("2")
+        .parse::<usize>()
+        .unwrap_or(2);
+    
+    println!("\nEnter maximum parallel Discord webhook requests [4]: ");
+    let max_discord_parallelism = read_line_with_default("4")
+        .parse::<usize>()
+        .unwrap_or(4);
+    
+    println!("\nEnter maximum parallel processing tasks (ffmpeg, etc.) [4]: ");
+    let max_processing_parallelism = read_line_with_default("4")
         .parse::<usize>()
         .unwrap_or(4);
     
@@ -386,11 +402,6 @@ pub async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error 
     let auto_follow_interval = read_line_with_default("24")
         .parse::<usize>()
         .unwrap_or(24);
-    
-    println!("\nMaximum concurrent ffmpeg processes per user [2]: ");
-    let max_concurrent_processing = read_line_with_default("2")
-        .parse::<usize>()
-        .unwrap_or(2);
     
     println!("\nHow often to save the database (in poll cycles) [1]: ");
     let db_save_interval = read_line_with_default("1")
@@ -420,12 +431,13 @@ pub async fn generate_config(url: &str) -> Result<(), Box<dyn std::error::Error 
         max_tracks_per_user,
         pagination_size,
         temp_dir,
-        max_parallel_fetches,
+        max_soundcloud_parallelism,
+        max_discord_parallelism,
+        max_processing_parallelism,
         scrape_user_likes,
         max_likes_per_user,
         auto_follow_source,
         auto_follow_interval,
-        max_concurrent_processing,
         db_save_interval,
         db_save_tracks,
         show_ffmpeg_output,

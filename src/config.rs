@@ -31,12 +31,15 @@ pub struct Config {
     pub pagination_size: usize,
     // Temp directory for downloads (uses system temp if not specified)
     pub temp_dir: Option<String>,
-    /// Maximum number of parallel user fetches
-    #[serde(default = "default_max_parallel_fetches")]
-    pub max_parallel_fetches: usize,
-    /// Maximum number of concurrent ffmpeg processes per user
-    #[serde(default = "default_max_concurrent_processing")]
-    pub max_concurrent_processing: usize,
+    /// Maximum number of parallel SoundCloud API requests (kept low to avoid rate limiting)
+    #[serde(default = "default_max_soundcloud_parallelism")]
+    pub max_soundcloud_parallelism: usize,
+    /// Maximum number of parallel Discord webhook requests
+    #[serde(default = "default_max_discord_parallelism")]
+    pub max_discord_parallelism: usize,
+    /// Maximum number of parallel processing tasks (ffmpeg, etc.)
+    #[serde(default = "default_max_processing_parallelism")]
+    pub max_processing_parallelism: usize,
     /// Whether to scrape and monitor user likes
     #[serde(default = "default_scrape_user_likes")]
     pub scrape_user_likes: bool,
@@ -88,13 +91,19 @@ fn default_log_level() -> String {
     "info".to_string()
 }
 
-fn default_max_parallel_fetches() -> usize {
-    4
+/// Default value for max parallel SoundCloud API requests
+fn default_max_soundcloud_parallelism() -> usize {
+    2 // Default to 2 concurrent SoundCloud API requests to avoid rate limiting
 }
 
-/// Default maximum concurrent ffmpeg processes per user
-fn default_max_concurrent_processing() -> usize {
-    2
+/// Default value for max parallel Discord webhook requests
+fn default_max_discord_parallelism() -> usize {
+    4 // Default to 4 concurrent Discord webhook requests
+}
+
+/// Default value for max parallel processing tasks
+fn default_max_processing_parallelism() -> usize {
+    4 // Default to 4 concurrent processing tasks
 }
 
 /// Default option for scraping user likes
@@ -143,8 +152,9 @@ impl Default for Config {
             max_tracks_per_user: default_max_tracks_per_user(),
             pagination_size: default_pagination_size(),
             temp_dir: None,
-            max_parallel_fetches: default_max_parallel_fetches(),
-            max_concurrent_processing: default_max_concurrent_processing(),
+            max_soundcloud_parallelism: default_max_soundcloud_parallelism(),
+            max_discord_parallelism: default_max_discord_parallelism(),
+            max_processing_parallelism: default_max_processing_parallelism(),
             scrape_user_likes: default_scrape_user_likes(),
             max_likes_per_user: default_max_likes_per_user(),
             auto_follow_source: None,
@@ -217,12 +227,16 @@ impl Config {
             }
         }
         
-        if let Some(parallel) = config_json.get("max_parallel_fetches").and_then(|v| v.as_u64()) {
-            config.max_parallel_fetches = parallel as usize;
+        if let Some(soundcloud_parallelism) = config_json.get("max_soundcloud_parallelism").and_then(|v| v.as_u64()) {
+            config.max_soundcloud_parallelism = soundcloud_parallelism as usize;
         }
         
-        if let Some(concurrent) = config_json.get("max_concurrent_processing").and_then(|v| v.as_u64()) {
-            config.max_concurrent_processing = concurrent as usize;
+        if let Some(discord_parallelism) = config_json.get("max_discord_parallelism").and_then(|v| v.as_u64()) {
+            config.max_discord_parallelism = discord_parallelism as usize;
+        }
+        
+        if let Some(processing_parallelism) = config_json.get("max_processing_parallelism").and_then(|v| v.as_u64()) {
+            config.max_processing_parallelism = processing_parallelism as usize;
         }
         
         if let Some(scrape_likes) = config_json.get("scrape_user_likes").and_then(|v| v.as_bool()) {
@@ -269,7 +283,7 @@ impl Config {
         info!("Loaded configuration from {}", config_path);
         debug!("Config: log_level={}, poll_interval={}s, max_tracks={}, scrape_likes={}, max_concurrent_processing={}",
                config.log_level, config.poll_interval_sec, config.max_tracks_per_user, 
-               config.scrape_user_likes, config.max_concurrent_processing);
+               config.scrape_user_likes, config.max_processing_parallelism);
         Ok(config)
     }
     

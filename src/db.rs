@@ -1,4 +1,4 @@
-use std::collections::{HashSet, HashMap};
+use std::collections::HashMap;
 use std::fs::{File, copy, remove_file};
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
@@ -435,7 +435,8 @@ impl TrackDatabase {
         &mut self,
         user_id: &str,
         config: &crate::config::Config,
-        processing_semaphore: &Arc<tokio::sync::Semaphore>
+        processing_semaphore: &Arc<tokio::sync::Semaphore>,
+        discord_semaphore: &Arc<tokio::sync::Semaphore>
     ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
         // Fetch latest tracks from SoundCloud
         let tracks = match crate::soundcloud::get_user_tracks(user_id, config.max_tracks_per_user, config.pagination_size).await {
@@ -485,7 +486,7 @@ impl TrackDatabase {
             return Ok(0); // No new tracks
         }
         
-        // Process new tracks in parallel with a resource limit for ffmpeg
+        // Process new tracks in parallel with resource limits
         let mut tasks = Vec::new();
         let successful_tracks: Arc<Mutex<Vec<(String, Option<String>, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
         
@@ -499,19 +500,20 @@ impl TrackDatabase {
                 }
             };
             
-            let semaphore = Arc::clone(processing_semaphore);
+            let processing_semaphore = Arc::clone(processing_semaphore);
+            let discord_semaphore = Arc::clone(discord_semaphore);
             let successful_tracks = Arc::clone(&successful_tracks);
             
             // Spawn a task to process this track
             let webhook_url = config.discord_webhook_url.clone();
             let temp_dir = config.temp_dir.clone();
-            let user_id_clone = user_id.to_string();
+            let _user_id_clone = user_id.to_string();
             let task = tokio::spawn(async move {
                 // Acquire semaphore to limit concurrent ffmpeg processes
-                let _permit = match semaphore.acquire().await {
+                let _permit = match processing_semaphore.acquire().await {
                     Ok(permit) => permit,
                     Err(e) => {
-                        error!("Failed to acquire semaphore for track {}: {}", track.id, e);
+                        error!("Failed to acquire processing semaphore for track {}: {}", track.id, e);
                         return;
                     }
                 };
@@ -527,62 +529,14 @@ impl TrackDatabase {
                     }
                 };
                 
-                // Download and process audio
-                info!("Processing audio and artwork for track");
-                let processing_result = match crate::audio::process_track_audio(&track_details, temp_dir.as_deref()).await {
-                    Ok((audio_files, artwork, json)) => {
-                        let mut files_for_discord = Vec::new();
-                        
-                        // Process all audio files
-                        for (format_info, path) in &audio_files {
-                            let file_path = path.clone();
-                            let filename = std::path::Path::new(&file_path)
-                                .file_name()
-                                .unwrap_or_else(|| std::ffi::OsStr::new("track.audio"))
-                                .to_string_lossy()
-                                .to_string();
-                            
-                            info!("Audio file ({}): {}", format_info, filename);
-                            files_for_discord.push((file_path, filename));
-                        }
-                        
-                        // Add artwork if available
-                        if let Some(path) = artwork {
-                            let file_path = path.clone();
-                            let filename = std::path::Path::new(&file_path)
-                                .file_name()
-                                .unwrap_or_else(|| std::ffi::OsStr::new("cover.jpg"))
-                                .to_string_lossy()
-                                .to_string();
-                            
-                            info!("Downloaded artwork: {}", filename);
-                            files_for_discord.push((file_path, filename));
-                        }
-                        
-                        // Add JSON metadata if available
-                        if let Some(path) = json {
-                            let file_path = path.clone();
-                            let filename = std::path::Path::new(&file_path)
-                                .file_name()
-                                .unwrap_or_else(|| std::ffi::OsStr::new("data.json"))
-                                .to_string_lossy()
-                                .to_string();
-                            
-                            info!("Saved JSON metadata: {}", filename);
-                            files_for_discord.push((file_path, filename));
-                        }
-                        
-                        files_for_discord
-                    },
-                    Err(e) => {
-                        error!("Failed to process audio for track {}: {}", track.id, e);
-                        Vec::new()
-                    }
-                };
-                
-                // Send to Discord
-                match crate::discord::send_track_webhook(&webhook_url, &track_details, Some(processing_result.clone())).await {
-                    Ok(response) => {
+                // Process and post the track with both semaphores
+                match crate::soundcloud::process_and_post_track(
+                    &track.id,
+                    &webhook_url,
+                    temp_dir.as_deref(),
+                    Some(&discord_semaphore)
+                ).await {
+                    Ok((_track_id, _user_id, response)) => {
                         info!("Successfully sent webhook for track: {} by {} (Discord message ID: {})", 
                               track_details.title, track_details.user.username, response.message_id);
                         let mut tracks = successful_tracks.lock().unwrap();
@@ -593,16 +547,9 @@ impl TrackDatabase {
                         ));
                     },
                     Err(e) => {
-                        error!("Failed to send webhook for track {}: {}", track.id, e);
+                        error!("Failed to process and post track {}: {}", track.id, e);
                     }
                 };
-                
-                // Clean up temp files
-                for (path, _) in processing_result.clone() {
-                    if let Err(e) = crate::audio::delete_temp_file(&path).await {
-                        warn!("Failed to clean up temp file {}: {}", path, e);
-                    }
-                }
             });
             
             tasks.push(task);

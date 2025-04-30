@@ -306,9 +306,9 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
         let mut users_processed = 0;
         let mut total_new_tracks = 0;
         
-        // Process users in batches
+        // Process users in batches with SoundCloud parallelism limit
         while users_processed < users_vec.len() {
-            let batch_size = std::cmp::min(config.max_parallel_fetches, users_vec.len() - users_processed);
+            let batch_size = std::cmp::min(config.max_soundcloud_parallelism, users_vec.len() - users_processed);
             let batch = &users_vec[users_processed..users_processed + batch_size];
             
             let mut tasks = Vec::new();
@@ -413,14 +413,15 @@ async fn poll_user(
     user_id: &str,
     db: &Arc<Mutex<TrackDatabase>>,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    // Create a semaphore for limiting concurrent ffmpeg processes
-    let processing_semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent_processing));
+    // Create semaphores for limiting concurrency
+    let processing_semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_processing_parallelism));
+    let discord_semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_discord_parallelism));
     
     // Get mutable access to the database
     let mut db_guard = db.lock().await;
     
-    // Use our new method to poll the user
-    db_guard.poll_user(user_id, config, &processing_semaphore).await
+    // Use the poll_user method with both semaphores
+    db_guard.poll_user(user_id, config, &processing_semaphore, &discord_semaphore).await
 }
 
 /// Check for new followings from a source user and add them to the watched users list

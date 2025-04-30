@@ -1,6 +1,6 @@
 # SoundCloud Archiver Webhook
 
-A Rust application that watches SoundCloud users for new tracks and sends them to a Discord webhook with rich formatting and audio files.
+A Rust application that watches SoundCloud users for new tracks and sends them to a Discord webhook with rich formatting and audio files. Features granular parallelism controls to optimize performance while avoiding rate limits.
 
 ## Features
 
@@ -14,6 +14,7 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
 - Automatic client ID regeneration
 - Optional scraping of users' liked tracks
 - Auto-follow mode to automatically add new followings from a source user
+- Granular parallelism controls for SoundCloud API, Discord webhooks, and processing tasks
 - Parallel processing of tracks and transcoding operations
 
 ## Requirements
@@ -46,8 +47,9 @@ A Rust application that watches SoundCloud users for new tracks and sends them t
      "max_tracks_per_user": 500,
      "pagination_size": 50,
      "temp_dir": null,
-     "max_parallel_fetches": 4,
-     "max_concurrent_processing": 2,
+     "max_soundcloud_parallelism": 2,
+     "max_discord_parallelism": 4,
+     "max_processing_parallelism": 4,
      "scrape_user_likes": false,
      "max_likes_per_user": 500,
      "auto_follow_source": null,
@@ -180,8 +182,9 @@ docker run --rm \
 - `max_tracks_per_user` (default: 500): Maximum number of tracks to fetch per user (total limit)
 - `pagination_size` (default: 50): Number of tracks/likes to fetch per API request (pagination size)
 - `temp_dir` (optional): Directory for temporary files (if not specified, system temp dir is used)
-- `max_parallel_fetches` (default: 4): Maximum number of users to process in parallel
-- `max_concurrent_processing` (default: 2): Maximum number of concurrent ffmpeg processes per user
+- `max_soundcloud_parallelism` (default: 2): Maximum number of parallel SoundCloud API requests (keep this low to avoid rate limiting)
+- `max_discord_parallelism` (default: 4): Maximum number of parallel Discord webhook requests
+- `max_processing_parallelism` (default: 4): Maximum number of parallel processing tasks (ffmpeg, etc.)
 - `scrape_user_likes` (default: false): Whether to scrape liked tracks from users being monitored
 - `max_likes_per_user` (default: 500): Maximum number of likes to fetch for each user when `scrape_user_likes` is enabled (uses `pagination_size` for API requests)
 - `auto_follow_source` (optional): User ID or URL whose followings you want to automatically add to your watched users
@@ -190,6 +193,72 @@ docker run --rm \
 - `db_save_tracks` (default: 5): Number of new tracks to process before automatically saving the database. This works in addition to the time-based saving with `db_save_interval`.
 - `show_ffmpeg_output` (default: false): Whether to show ffmpeg output in the console logs
 - `log_file` (default: "latest.log"): Path to the log file for application logs
+
+## Parallelism Controls
+
+The application provides three distinct parallelism controls to help you manage resource usage and avoid rate limiting from external services:
+
+### 1. SoundCloud API Parallelism (`max_soundcloud_parallelism`)
+
+- **Default value**: 2
+- **Purpose**: Controls how many simultaneous SoundCloud API requests can be made
+- **Recommended value**: 1-2
+- **Notes**: SoundCloud's API will rate limit your requests if you make too many simultaneous calls. Keep this value low (1-2) to avoid getting rate limited. This affects how many users are processed concurrently during the polling cycle.
+
+### 2. Discord Webhook Parallelism (`max_discord_parallelism`)
+
+- **Default value**: 4
+- **Purpose**: Controls how many simultaneous Discord webhook requests can be made
+- **Recommended value**: 4-10
+- **Notes**: Discord has its own rate limiting for webhooks. If you send too many requests too quickly, Discord will start rejecting them. A value of 4-10 should be fine for most use cases, but you can adjust based on your Discord server's tier and usage.
+
+### 3. Processing Parallelism (`max_processing_parallelism`)
+
+- **Default value**: 4
+- **Purpose**: Controls how many simultaneous processing tasks (like ffmpeg encoding) can run
+- **Recommended value**: Based on your CPU cores (typically 4-8)
+- **Notes**: This affects CPU and memory usage. Higher values will use more system resources but process tracks faster. For systems with 4+ CPU cores, a value of 4-8 works well.
+
+### Benefits of Granular Control
+
+These separate parallelism controls provide several benefits:
+
+1. **Prevent rate limiting**: By limiting API calls to external services appropriately, you avoid getting temporarily blocked or throttled
+2. **Optimize resource usage**: You can tune each type of operation to your system's capabilities
+3. **Balance performance and reliability**: Process tracks as quickly as possible without overwhelming external services or your system
+4. **Adapt to different environments**: Tune settings based on whether you're running on a powerful server or a modest home system
+
+### Recommended Configuration
+
+For most users, the default values should work well:
+
+```json
+{
+  "max_soundcloud_parallelism": 2,
+  "max_discord_parallelism": 4,
+  "max_processing_parallelism": 4
+}
+```
+
+For systems with limited resources:
+
+```json
+{
+  "max_soundcloud_parallelism": 1,
+  "max_discord_parallelism": 2,
+  "max_processing_parallelism": 2
+}
+```
+
+For powerful systems with good network connections:
+
+```json
+{
+  "max_soundcloud_parallelism": 2,
+  "max_discord_parallelism": 8,
+  "max_processing_parallelism": 8
+}
+```
 
 ## Usage
 

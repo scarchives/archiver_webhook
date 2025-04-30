@@ -6,6 +6,7 @@ use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tokio::time::sleep;
+use std::sync::Arc;
 
 // Global client ID cache
 lazy_static::lazy_static! {
@@ -1179,7 +1180,8 @@ pub async fn display_soundcloud_info(url: &str) -> Result<(), Box<dyn std::error
 pub async fn process_and_post_track(
     id_or_url: &str,
     discord_webhook_url: &str,
-    temp_dir: Option<&str>
+    temp_dir: Option<&str>,
+    discord_semaphore: Option<&Arc<tokio::sync::Semaphore>>
 ) -> Result<(String, String, crate::discord::WebhookResponse), Box<dyn std::error::Error + Send + Sync>> {
     // Check if this is a URL or an ID
     let track_id = if id_or_url.starts_with("http") {
@@ -1283,6 +1285,20 @@ pub async fn process_and_post_track(
     
     // Send to Discord
     info!("Sending webhook for track: {} by {}", track_details.title, track_details.user.username);
+    
+    // Acquire Discord semaphore if provided
+    let _discord_permit = if let Some(semaphore) = discord_semaphore {
+        match semaphore.acquire().await {
+            Ok(permit) => Some(permit),
+            Err(e) => {
+                error!("Failed to acquire Discord semaphore for track {}: {}", track_id, e);
+                return Err(format!("Failed to acquire Discord semaphore: {}", e).into());
+            }
+        }
+    } else {
+        None
+    };
+    
     let webhook_response = match crate::discord::send_track_webhook(discord_webhook_url, &track_details, Some(processing_result.clone())).await {
         Ok(response) => {
             info!("Successfully sent webhook for track with message ID: {}", response.message_id);
