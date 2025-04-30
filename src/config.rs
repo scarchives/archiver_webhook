@@ -364,4 +364,114 @@ impl Users {
         info!("Successfully saved {} users to {}", self.users.len(), path);
         Ok(())
     }
+
+    /// Update users list with new followings from a source user
+    /// 
+    /// This method fetches followings from a SoundCloud user and adds
+    /// any new followings to the users list, then saves the changes.
+    pub async fn update_followings_from_source(
+        &mut self,
+        source: &str,
+        users_file: &str
+    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        info!("Checking for new users followed by source: {}", source);
+        
+        // Initialize SoundCloud client if not already done
+        if crate::soundcloud::get_client_id().is_none() {
+            info!("Initializing SoundCloud client");
+            match crate::soundcloud::initialize().await {
+                Ok(_) => info!("SoundCloud client initialized successfully"),
+                Err(e) => {
+                    error!("Failed to initialize SoundCloud client: {}", e);
+                    return Err(e);
+                }
+            }
+        }
+        
+        // Determine if the source is an ID or URL
+        let user_id = if source.contains("soundcloud.com") || source.contains("http") {
+            // It's a URL, resolve it
+            info!("Resolving URL to user ID: {}", source);
+            match crate::soundcloud::resolve_url(source).await {
+                Ok(data) => {
+                    if let Some(kind) = data.get("kind").and_then(|v| v.as_str()) {
+                        if kind == "user" {
+                            match data.get("id").and_then(|v| v.as_u64()) {
+                                Some(id) => id.to_string(),
+                                None => {
+                                    error!("Could not extract user ID from resolved URL data");
+                                    return Err("Missing user ID in resolved data".into());
+                                }
+                            }
+                        } else {
+                            error!("URL resolved to non-user kind: {}", kind);
+                            return Err(format!("URL resolved to non-user kind: {}", kind).into());
+                        }
+                    } else {
+                        error!("URL resolved to object with missing kind");
+                        return Err("URL resolved to object with missing kind".into());
+                    }
+                },
+                Err(e) => {
+                    error!("Failed to resolve URL {}: {}", source, e);
+                    return Err(e);
+                }
+            }
+        } else {
+            // It's already an ID
+            source.to_string()
+        };
+        
+        // Fetch the user's followings
+        info!("Fetching followings for user ID: {}", user_id);
+        let followings = match crate::soundcloud::get_user_followings(&user_id, None).await {
+            Ok(f) => f,
+            Err(e) => {
+                error!("Failed to fetch followings: {}", e);
+                return Err(e);
+            }
+        };
+        
+        info!("Found {} followings for source user", followings.len());
+        
+        // Extract user IDs from followings
+        let following_ids: Vec<String> = followings.iter()
+            .filter_map(|f| f.get("id").and_then(|v| v.as_u64()).map(|id| id.to_string()))
+            .collect();
+        
+        // Find new followings not already in users list
+        let new_followings: Vec<String> = following_ids.iter()
+            .filter(|id| !self.users.contains(id))
+            .cloned()
+            .collect();
+        
+        let count = new_followings.len();
+        
+        if count > 0 {
+            info!("Adding {} new followings to users list", count);
+            for id in &new_followings {
+                // Extract username if available for logging
+                let username = followings.iter()
+                    .find(|u| u.get("id").and_then(|v| v.as_u64()).map(|i| i.to_string()) == Some(id.clone()))
+                    .and_then(|u| u.get("username").and_then(|v| v.as_str()))
+                    .unwrap_or("Unknown");
+                
+                info!("Adding new user to watch: {} ({})", username, id);
+                self.users.push(id.clone());
+            }
+            
+            // Save updated users file
+            match self.save(users_file) {
+                Ok(_) => info!("Successfully saved {} new users to {}", count, users_file),
+                Err(e) => {
+                    error!("Failed to save updated users file: {}", e);
+                    return Err(e);
+                }
+            }
+        } else {
+            debug!("No new followings found for user {}", user_id);
+        }
+        
+        Ok(count)
+    }
 } 

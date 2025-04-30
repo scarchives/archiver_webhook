@@ -147,8 +147,6 @@ async fn resolve_soundcloud_url(url: &str) -> Result<(), Box<dyn std::error::Err
         }
     };
     
-    info!("Resolving SoundCloud URL: {}", url);
-    
     // Initialize SoundCloud client
     match soundcloud::initialize().await {
         Ok(_) => info!("SoundCloud client initialized successfully"),
@@ -158,112 +156,8 @@ async fn resolve_soundcloud_url(url: &str) -> Result<(), Box<dyn std::error::Err
         }
     }
     
-    // Resolve the URL
-    info!("Fetching metadata from SoundCloud API");
-    let resolved = match soundcloud::resolve_url(url).await {
-        Ok(data) => {
-            debug!("Successfully resolved URL");
-            data
-        },
-        Err(e) => {
-            error!("Failed to resolve URL: {}", e);
-            return Err(e);
-        }
-    };
-    
-    // Check if this is a track
-    if let Some(kind) = resolved.get("kind").and_then(|v| v.as_str()) {
-        info!("Resolved object type: {}", kind);
-        
-        if kind == "track" {
-            // Get the track ID
-            if let Some(id) = resolved.get("id").and_then(|v| v.as_u64()) {
-                let track_id = id.to_string();
-                info!("URL resolved to track ID: {}", track_id);
-                
-                // Get detailed track info
-                debug!("Fetching detailed track information");
-                let track = soundcloud::get_track_details(&track_id).await?;
-                
-                // Print track details
-                println!("\nTrack Information:");
-                println!("Title: {}", track.title);
-                println!("Artist: {}", track.user.username);
-                
-                if let Some(description) = &track.description {
-                    if !description.is_empty() {
-                        println!("Description: {}", description);
-                    }
-                }
-                
-                if let Some(count) = track.playback_count {
-                    println!("Plays: {}", count);
-                }
-                
-                if let Some(count) = track.likes_count {
-                    println!("Likes: {}", count);
-                }
-                
-                if let Some(genre) = &track.genre {
-                    if !genre.is_empty() {
-                        println!("Genre: {}", genre);
-                    }
-                }
-                
-                if let Some(tags) = &track.tag_list {
-                    if !tags.is_empty() {
-                        println!("Tags: {}", tags);
-                    }
-                }
-                
-                println!("Duration: {}:{:02}", track.duration / 1000 / 60, (track.duration / 1000) % 60);
-                println!("URL: {}", track.permalink_url);
-                
-                if track.downloadable.unwrap_or(false) {
-                    println!("Downloadable: Yes");
-                } else {
-                    println!("Downloadable: No");
-                }
-                
-                info!("Successfully displayed track information");
-                return Ok(());
-            }
-        } else if kind == "user" {
-            // Get the user ID
-            if let Some(id) = resolved.get("id").and_then(|v| v.as_u64()) {
-                let user_id = id.to_string();
-                info!("URL resolved to user ID: {}", user_id);
-                
-                // Print user details
-                println!("\nUser Information:");
-                println!("Username: {}", resolved.get("username").and_then(|v| v.as_str()).unwrap_or("Unknown"));
-                println!("ID: {}", user_id);
-                println!("URL: {}", resolved.get("permalink_url").and_then(|v| v.as_str()).unwrap_or(""));
-                
-                if let Some(followers) = resolved.get("followers_count").and_then(|v| v.as_u64()) {
-                    println!("Followers: {}", followers);
-                }
-                
-                if let Some(tracks) = resolved.get("track_count").and_then(|v| v.as_u64()) {
-                    println!("Tracks: {}", tracks);
-                }
-                
-                // Print instructions for adding to watchlist
-                println!("\nTo add this user to your watchlist, add the following ID to your users.json file:");
-                println!("  {}", user_id);
-                
-                info!("Successfully displayed user information");
-                return Ok(());
-            }
-        }
-    }
-    
-    // If we get here, something went wrong with the URL
-    warn!("URL resolved, but could not determine if it's a track or user");
-    println!("URL resolved, but could not determine if it's a track or user.");
-    println!("Raw data: {}", serde_json::to_string_pretty(&resolved)?);
-    
-    Ok(())
+    // Use the modularized function from soundcloud.rs
+    soundcloud::display_soundcloud_info(url).await
 }
 
 /// Initialize tracks database with all existing tracks from all users
@@ -328,62 +222,21 @@ async fn initialize_tracks_database() -> Result<(), Box<dyn std::error::Error + 
         }
     }
     
-    // Track stats
-    let mut total_users_processed = 0;
-    let mut total_tracks_added = 0;
-    
-    // Process each user
-    for user_id in &users.users {
-        info!("Fetching tracks for user {}", user_id);
-        
-        // Collect all tracks from this user
-        let mut all_tracks = Vec::new();
-        
-        // Get uploaded tracks
-        match soundcloud::get_user_tracks(user_id, config.max_tracks_per_user, config.pagination_size).await {
-            Ok(tracks) => {
-                info!("Found {} uploaded tracks for user {}", tracks.len(), user_id);
-                all_tracks.extend(tracks);
-            },
-            Err(e) => {
-                error!("Failed to fetch tracks for user {}: {}", user_id, e);
-                continue;
-            }
-        }
-        
-        // If enabled, get liked tracks too
-        if config.scrape_user_likes {
-            info!("Fetching likes for user {} (enabled in config)", user_id);
-            match soundcloud::get_user_likes(user_id, config.max_likes_per_user, config.pagination_size).await {
-                Ok(likes) => {
-                    let liked_tracks = soundcloud::extract_tracks_from_likes(&likes);
-                    info!("Found {} liked tracks for user {}", liked_tracks.len(), user_id);
-                    all_tracks.extend(liked_tracks);
-                },
-                Err(e) => {
-                    warn!("Failed to fetch likes for user {}: {}", user_id, e);
-                }
-            }
-        }
-        
-        // Extract track IDs
-        let track_ids: Vec<String> = all_tracks.iter().map(|t| t.id.clone()).collect();
-        info!("Total tracks for user {}: {}", user_id, track_ids.len());
-        
-        // Add to database
-        let current_count = db.get_all_tracks().len();
-        if let Err(e) = db.initialize_with_tracks(&track_ids) {
+    // Use our new method to initialize the database with tracks from users
+    info!("Initializing database with tracks from {} users", users.users.len());
+    let (total_users_processed, total_tracks_added) = match db.initialize_with_tracks_from_users(
+        &users.users,
+        config.max_tracks_per_user,
+        config.pagination_size,
+        config.scrape_user_likes,
+        config.max_likes_per_user
+    ).await {
+        Ok(result) => result,
+        Err(e) => {
             error!("Failed to initialize database with tracks: {}", e);
-            continue;
+            return Err(e);
         }
-        let new_count = db.get_all_tracks().len();
-        
-        let added = new_count - current_count;
-        total_tracks_added += added;
-        
-        info!("Added {} new tracks for user {} to database", added, user_id);
-        total_users_processed += 1;
-    }
+    };
     
     // Save database - this is now redundant but kept for safety
     if let Err(e) = db.save() {
@@ -712,206 +565,14 @@ async fn poll_user(
     user_id: &str,
     db: &Arc<Mutex<TrackDatabase>>,
 ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
-    // Fetch latest tracks from SoundCloud
-    let tracks = match soundcloud::get_user_tracks(user_id, config.max_tracks_per_user, config.pagination_size).await {
-        Ok(t) => t,
-        Err(e) => {
-            error!("Failed to fetch tracks for user {}: {}", user_id, e);
-            return Err(e);
-        }
-    };
+    // Create a semaphore for limiting concurrent ffmpeg processes
+    let processing_semaphore = Arc::new(tokio::sync::Semaphore::new(config.max_concurrent_processing));
     
-    debug!("Fetched {} tracks for user {}", tracks.len(), user_id);
+    // Get mutable access to the database
+    let mut db_guard = db.lock().await;
     
-    // If enabled, fetch user likes as well
-    let mut all_tracks = tracks.clone();
-    
-    if config.scrape_user_likes {
-        debug!("Fetching likes for user {} (enabled in config)", user_id);
-        match soundcloud::get_user_likes(user_id, config.max_likes_per_user, config.pagination_size).await {
-            Ok(likes) => {
-                info!("Fetched {} likes for user {}", likes.len(), user_id);
-                
-                // Extract tracks from likes
-                let liked_tracks = soundcloud::extract_tracks_from_likes(&likes);
-                debug!("Extracted {} tracks from user {}'s likes", liked_tracks.len(), user_id);
-                
-                // Add liked tracks to our collection
-                all_tracks.extend(liked_tracks);
-                debug!("Total tracks (uploads + likes): {}", all_tracks.len());
-            },
-            Err(e) => {
-                warn!("Failed to fetch likes for user {}: {}", user_id, e);
-                // Continue with just the user's tracks
-            }
-        }
-    }
-    
-    // Check which tracks are new
-    let track_ids: Vec<String> = all_tracks.iter().map(|t| t.id.clone()).collect();
-    
-    // Get new tracks without adding to database yet
-    let new_track_ids = {
-        let mut db_guard = db.lock().await;
-        track_ids.iter()
-            .filter(|id| !db_guard.has_track(id))
-            .cloned()
-            .collect::<Vec<String>>()
-    };
-    
-    if new_track_ids.is_empty() {
-        return Ok(0); // No new tracks
-    }
-    
-    // Process new tracks in parallel with a resource limit for ffmpeg
-    // Default to maximum of 2 concurrent ffmpeg processes per user task unless configured differently
-    let max_concurrent_processing = config.max_concurrent_processing;
-    let processing_semaphore = Arc::new(tokio::sync::Semaphore::new(max_concurrent_processing));
-    
-    let mut tasks = Vec::new();
-    let mut successful_tracks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
-    
-    for track_id in &new_track_ids {
-        // Find the track in our collection
-        let track = match all_tracks.iter().find(|t| &t.id == track_id) {
-            Some(t) => t.clone(),
-            None => {
-                warn!("Could not find track {} in fetched tracks - skipping", track_id);
-                continue;
-            }
-        };
-        
-        let semaphore = Arc::clone(&processing_semaphore);
-        let successful_tracks = Arc::clone(&successful_tracks);
-        
-        // Spawn a task to process this track
-        let webhook_url = config.discord_webhook_url.clone();
-        let temp_dir = config.temp_dir.clone();
-        let task = tokio::spawn(async move {
-            // Acquire semaphore to limit concurrent ffmpeg processes
-            let _permit = match semaphore.acquire().await {
-                Ok(permit) => permit,
-                Err(e) => {
-                    error!("Failed to acquire semaphore for track {}: {}", track.id, e);
-                    return;
-                }
-            };
-            
-            debug!("Processing new track: {} (ID: {})", track.title, track.id);
-            
-            // Get full track details
-            let track_details = match soundcloud::get_track_details(&track.id).await {
-                Ok(t) => t,
-                Err(e) => {
-                    error!("Failed to get track details for {}: {}", track.id, e);
-                    return;
-                }
-            };
-            
-            // Download and process audio
-            info!("Processing audio and artwork for track");
-            let processing_result = match audio::process_track_audio(&track_details, temp_dir.as_deref()).await {
-                Ok((audio_files, artwork, json)) => {
-                    let mut files_for_discord = Vec::new();
-                    
-                    // Process all audio files
-                    for (format_info, path) in &audio_files {
-                        let file_path = path.clone();
-                        let filename = Path::new(&file_path)
-                            .file_name()
-                            .unwrap_or_else(|| std::ffi::OsStr::new("track.audio"))
-                            .to_string_lossy()
-                            .to_string();
-                        
-                        info!("Audio file ({}): {}", format_info, filename);
-                        files_for_discord.push((file_path, filename));
-                    }
-                    
-                    // Add artwork if available
-                    if let Some(path) = artwork {
-                        let file_path = path.clone();
-                        let filename = Path::new(&file_path)
-                            .file_name()
-                            .unwrap_or_else(|| std::ffi::OsStr::new("cover.jpg"))
-                            .to_string_lossy()
-                            .to_string();
-                        
-                        info!("Downloaded artwork: {}", filename);
-                        files_for_discord.push((file_path, filename));
-                    }
-                    
-                    // Add JSON metadata if available
-                    if let Some(path) = json {
-                        let file_path = path.clone();
-                        let filename = Path::new(&file_path)
-                            .file_name()
-                            .unwrap_or_else(|| std::ffi::OsStr::new("data.json"))
-                            .to_string_lossy()
-                            .to_string();
-                        
-                        info!("Saved JSON metadata: {}", filename);
-                        files_for_discord.push((file_path, filename));
-                    }
-                    
-                    files_for_discord
-                },
-                Err(e) => {
-                    error!("Failed to process audio for track {}: {}", track.id, e);
-                    Vec::new()
-                }
-            };
-            
-            // Send to Discord
-            match discord::send_track_webhook(&webhook_url, &track_details, Some(processing_result.clone())).await {
-                Ok(_) => {
-                    info!("Successfully sent webhook for track: {} by {}", 
-                          track_details.title, track_details.user.username);
-                    let mut tracks = successful_tracks.lock().await;
-                    tracks.push(track.id.clone());
-                },
-                Err(e) => {
-                    error!("Failed to send webhook for track {}: {}", track.id, e);
-                }
-            };
-            
-            // Clean up temp files
-            for (path, _) in processing_result.clone() {
-                if let Err(e) = audio::delete_temp_file(&path).await {
-                    warn!("Failed to clean up temp file {}: {}", path, e);
-                }
-            }
-        });
-        
-        tasks.push(task);
-    }
-    
-    // Wait for all track processing tasks to complete
-    let mut new_tracks_processed = 0;
-    
-    for task in tasks {
-        match task.await {
-            Ok(()) => {
-                new_tracks_processed += 1;
-            },
-            Err(e) => {
-                error!("Error in track processing task: {}", e);
-                increment_error_count();
-            }
-        }
-    }
-    
-    // Add successful tracks to database
-    let successful_tracks = successful_tracks.lock().await;
-    if !successful_tracks.is_empty() {
-        let mut db_guard = db.lock().await;
-        if let Err(e) = db_guard.add_tracks_and_save(&successful_tracks) {
-            error!("Failed to add successful tracks to database: {}", e);
-        } else {
-            increment_total_tracks(successful_tracks.len() as u64);
-        }
-    }
-    
-    Ok(new_tracks_processed)
+    // Use our new method to poll the user
+    db_guard.poll_user(user_id, config, &processing_semaphore).await
 }
 
 /// Post a single track to the webhook without checking the database
@@ -944,128 +605,12 @@ async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error::Er
         }
     }
     
-    // Check if this is a URL or an ID
-    let track_id = if id_or_url.starts_with("http") {
-        // This is a URL, resolve it
-        info!("Resolving SoundCloud URL: {}", id_or_url);
-        let resolved = match soundcloud::resolve_url(id_or_url).await {
-            Ok(data) => data,
-            Err(e) => {
-                error!("Failed to resolve URL: {}", e);
-                return Err(e);
-            }
-        };
-        
-        // Check if it's a track
-        if let Some(kind) = resolved.get("kind").and_then(|v| v.as_str()) {
-            if kind == "track" {
-                if let Some(id) = resolved.get("id").and_then(|v| v.as_u64()) {
-                    let track_id = id.to_string();
-                    info!("URL resolved to track ID: {}", track_id);
-                    track_id
-                } else {
-                    error!("Could not extract track ID from resolved URL");
-                    return Err("Could not extract track ID from resolved URL".into());
-                }
-            } else {
-                error!("URL does not point to a track, but to a {}", kind);
-                return Err(format!("URL points to a {}, not a track", kind).into());
-            }
-        } else {
-            error!("Could not determine object type from resolved URL");
-            return Err("Could not determine object type from resolved URL".into());
-        }
-    } else {
-        // Assume this is a track ID
-        id_or_url.to_string()
-    };
-    
-    // Get track details
-    info!("Fetching track details for ID: {}", track_id);
-    let track_details = match soundcloud::get_track_details(&track_id).await {
-        Ok(t) => {
-            info!("Successfully fetched track: {} by {}", t.title, t.user.username);
-            t
-        },
-        Err(e) => {
-            error!("Failed to get track details: {}", e);
-            return Err(e);
-        }
-    };
-    
-    // Download and process audio
-    info!("Processing audio and artwork for track");
-    let processing_result = match audio::process_track_audio(&track_details, config.temp_dir.as_deref()).await {
-        Ok((audio_files, artwork, json)) => {
-            let mut files = Vec::new();
-            
-            // Process all audio files
-            for (format_info, path) in &audio_files {
-                let file_path = path.clone();
-                let filename = Path::new(&file_path)
-                    .file_name()
-                    .unwrap_or_else(|| std::ffi::OsStr::new("track.audio"))
-                    .to_string_lossy()
-                    .to_string();
-                
-                info!("Audio file ({}): {}", format_info, filename);
-                files.push((file_path, filename));
-            }
-            
-            if let Some(path) = artwork {
-                let file_path = path.clone();
-                let filename = Path::new(&file_path)
-                    .file_name()
-                    .unwrap_or_else(|| std::ffi::OsStr::new("cover.jpg"))
-                    .to_string_lossy()
-                    .to_string();
-                
-                info!("Downloaded artwork: {}", filename);
-                files.push((file_path, filename));
-            }
-            
-            if let Some(path) = json {
-                let file_path = path.clone();
-                let filename = Path::new(&file_path)
-                    .file_name()
-                    .unwrap_or_else(|| std::ffi::OsStr::new("data.json"))
-                    .to_string_lossy()
-                    .to_string();
-                
-                info!("Saved JSON metadata: {}", filename);
-                files.push((file_path, filename));
-            }
-            
-            files
-        },
-        Err(e) => {
-            error!("Failed to process track media: {}", e);
-            Vec::new() // Continue without audio files
-        }
-    };
-    
-    // Send to Discord
-    info!("Sending webhook for track: {} by {}", track_details.title, track_details.user.username);
-    match discord::send_track_webhook(&config.discord_webhook_url, &track_details, Some(processing_result.clone())).await {
-        Ok(_) => {
-            info!("Successfully sent webhook for track");
-            println!("Track successfully posted to Discord: {} by {}", 
-                   track_details.title, track_details.user.username);
-        },
-        Err(e) => {
-            error!("Failed to send webhook: {}", e);
-            return Err(e);
-        }
-    }
-    
-    // Clean up temp files
-    for (path, _) in processing_result.clone() {
-        if let Err(e) = audio::delete_temp_file(&path).await {
-            warn!("Failed to clean up temp file {}: {}", path, e);
-        }
-    }
-    
-    Ok(())
+    // Use our modularized function to process and post the track
+    soundcloud::process_and_post_track(
+        id_or_url, 
+        &config.discord_webhook_url, 
+        config.temp_dir.as_deref()
+    ).await
 }
 
 /// Generate config.json and users.json files interactively based on a SoundCloud user's followings
@@ -1363,103 +908,6 @@ async fn update_followings_from_source(
         }
     };
     
-    info!("Checking for new users followed by source: {}", source);
-    
-    // Initialize SoundCloud client if not already done
-    if soundcloud::get_client_id().is_none() {
-        info!("Initializing SoundCloud client");
-        match soundcloud::initialize().await {
-            Ok(_) => info!("SoundCloud client initialized successfully"),
-            Err(e) => {
-                error!("Failed to initialize SoundCloud client: {}", e);
-                return Err(e);
-            }
-        }
-    }
-    
-    // Determine if the source is an ID or URL
-    let user_id = if source.contains("soundcloud.com") || source.contains("http") {
-        // It's a URL, resolve it
-        info!("Resolving URL to user ID: {}", source);
-        match soundcloud::resolve_url(source).await {
-            Ok(data) => {
-                if let Some(kind) = data.get("kind").and_then(|v| v.as_str()) {
-                    if kind == "user" {
-                        match data.get("id").and_then(|v| v.as_u64()) {
-                            Some(id) => id.to_string(),
-                            None => {
-                                error!("Could not extract user ID from resolved URL data");
-                                return Err("Missing user ID in resolved data".into());
-                            }
-                        }
-                    } else {
-                        error!("URL resolved to non-user kind: {}", kind);
-                        return Err(format!("URL resolved to non-user kind: {}", kind).into());
-                    }
-                } else {
-                    error!("URL resolved to object with missing kind");
-                    return Err("URL resolved to object with missing kind".into());
-                }
-            },
-            Err(e) => {
-                error!("Failed to resolve URL {}: {}", source, e);
-                return Err(e);
-            }
-        }
-    } else {
-        // It's already an ID
-        source.clone()
-    };
-    
-    // Fetch the user's followings
-    info!("Fetching followings for user ID: {}", user_id);
-    let followings = match soundcloud::get_user_followings(&user_id, None).await {
-        Ok(f) => f,
-        Err(e) => {
-            error!("Failed to fetch followings: {}", e);
-            return Err(e);
-        }
-    };
-    
-    info!("Found {} followings for source user", followings.len());
-    
-    // Extract user IDs from followings
-    let following_ids: Vec<String> = followings.iter()
-        .filter_map(|f| f.get("id").and_then(|v| v.as_u64()).map(|id| id.to_string()))
-        .collect();
-    
-    // Find new followings not already in users list
-    let new_followings: Vec<String> = following_ids.iter()
-        .filter(|id| !users.users.contains(id))
-        .cloned()
-        .collect();
-    
-    let count = new_followings.len();
-    
-    if count > 0 {
-        info!("Adding {} new followings to users list", count);
-        for id in &new_followings {
-            // Extract username if available for logging
-            let username = followings.iter()
-                .find(|u| u.get("id").and_then(|v| v.as_u64()).map(|i| i.to_string()) == Some(id.clone()))
-                .and_then(|u| u.get("username").and_then(|v| v.as_str()))
-                .unwrap_or("Unknown");
-            
-            info!("Adding new user to watch: {} ({})", username, id);
-            users.users.push(id.clone());
-        }
-        
-        // Save updated users file
-        match users.save(&config.users_file) {
-            Ok(_) => info!("Successfully saved {} new users to {}", count, config.users_file),
-            Err(e) => {
-                error!("Failed to save updated users file: {}", e);
-                return Err(e);
-            }
-        }
-    } else {
-        debug!("No new followings found for user {}", user_id);
-    }
-    
-    Ok(count)
+    // Use our new method to update followings
+    users.update_followings_from_source(source, &config.users_file).await
 }

@@ -4,6 +4,7 @@ use std::io::{BufReader, BufWriter};
 use std::path::Path;
 use log::{info, debug, trace, error, warn};
 use serde::{Deserialize, Serialize};
+use std::sync::{Arc, Mutex};
 
 /// Simple database to store known track IDs
 #[derive(Debug, Serialize, Deserialize)]
@@ -191,5 +192,274 @@ impl TrackDatabase {
         self.save()?;
         info!("Database saved successfully with {} tracks", self.tracks.len());
         Ok(())
+    }
+
+    /// Initialize database with tracks from multiple users
+    pub async fn initialize_with_tracks_from_users(
+        &mut self, 
+        users: &[String], 
+        max_tracks_per_user: usize,
+        pagination_size: usize,
+        scrape_likes: bool,
+        max_likes_per_user: usize,
+    ) -> Result<(usize, usize), Box<dyn std::error::Error + Send + Sync>> {
+        let mut total_users_processed = 0;
+        let mut total_tracks_added = 0;
+        
+        // Process each user
+        for user_id in users {
+            info!("Fetching tracks for user {}", user_id);
+            
+            // Collect all tracks from this user
+            let mut all_tracks = Vec::new();
+            
+            // Get uploaded tracks
+            match crate::soundcloud::get_user_tracks(user_id, max_tracks_per_user, pagination_size).await {
+                Ok(tracks) => {
+                    info!("Found {} uploaded tracks for user {}", tracks.len(), user_id);
+                    all_tracks.extend(tracks);
+                },
+                Err(e) => {
+                    error!("Failed to fetch tracks for user {}: {}", user_id, e);
+                    continue;
+                }
+            }
+            
+            // If enabled, get liked tracks too
+            if scrape_likes {
+                info!("Fetching likes for user {} (enabled in config)", user_id);
+                match crate::soundcloud::get_user_likes(user_id, max_likes_per_user, pagination_size).await {
+                    Ok(likes) => {
+                        let liked_tracks = crate::soundcloud::extract_tracks_from_likes(&likes);
+                        info!("Found {} liked tracks for user {}", liked_tracks.len(), user_id);
+                        all_tracks.extend(liked_tracks);
+                    },
+                    Err(e) => {
+                        warn!("Failed to fetch likes for user {}: {}", user_id, e);
+                    }
+                }
+            }
+            
+            // Extract track IDs
+            let track_ids: Vec<String> = all_tracks.iter().map(|t| t.id.clone()).collect();
+            info!("Total tracks for user {}: {}", user_id, track_ids.len());
+            
+            // Add to database
+            let current_count = self.tracks.len();
+            if let Err(e) = self.initialize_with_tracks(&track_ids) {
+                error!("Failed to initialize database with tracks: {}", e);
+                continue;
+            }
+            let new_count = self.tracks.len();
+            
+            let added = new_count - current_count;
+            total_tracks_added += added;
+            
+            info!("Added {} new tracks for user {} to database", added, user_id);
+            total_users_processed += 1;
+        }
+        
+        Ok((total_users_processed, total_tracks_added))
+    }
+
+    /// Poll a user for new tracks and process them
+    pub async fn poll_user(
+        &mut self,
+        user_id: &str,
+        config: &crate::config::Config,
+        processing_semaphore: &Arc<tokio::sync::Semaphore>
+    ) -> Result<usize, Box<dyn std::error::Error + Send + Sync>> {
+        // Fetch latest tracks from SoundCloud
+        let tracks = match crate::soundcloud::get_user_tracks(user_id, config.max_tracks_per_user, config.pagination_size).await {
+            Ok(t) => t,
+            Err(e) => {
+                error!("Failed to fetch tracks for user {}: {}", user_id, e);
+                return Err(e);
+            }
+        };
+        
+        debug!("Fetched {} tracks for user {}", tracks.len(), user_id);
+        
+        // If enabled, fetch user likes as well
+        let mut all_tracks = tracks.clone();
+        
+        if config.scrape_user_likes {
+            debug!("Fetching likes for user {} (enabled in config)", user_id);
+            match crate::soundcloud::get_user_likes(user_id, config.max_likes_per_user, config.pagination_size).await {
+                Ok(likes) => {
+                    info!("Fetched {} likes for user {}", likes.len(), user_id);
+                    
+                    // Extract tracks from likes
+                    let liked_tracks = crate::soundcloud::extract_tracks_from_likes(&likes);
+                    debug!("Extracted {} tracks from user {}'s likes", liked_tracks.len(), user_id);
+                    
+                    // Add liked tracks to our collection
+                    all_tracks.extend(liked_tracks);
+                    debug!("Total tracks (uploads + likes): {}", all_tracks.len());
+                },
+                Err(e) => {
+                    warn!("Failed to fetch likes for user {}: {}", user_id, e);
+                    // Continue with just the user's tracks
+                }
+            }
+        }
+        
+        // Check which tracks are new
+        let track_ids: Vec<String> = all_tracks.iter().map(|t| t.id.clone()).collect();
+        
+        // Get new track IDs without adding to database yet
+        let new_track_ids: Vec<String> = track_ids.iter()
+            .filter(|id| !self.has_track(id))
+            .cloned()
+            .collect::<Vec<String>>();
+        
+        if new_track_ids.is_empty() {
+            return Ok(0); // No new tracks
+        }
+        
+        // Process new tracks in parallel with a resource limit for ffmpeg
+        let mut tasks = Vec::new();
+        let successful_tracks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        
+        for track_id in &new_track_ids {
+            // Find the track in our collection
+            let track = match all_tracks.iter().find(|t| &t.id == track_id) {
+                Some(t) => t.clone(),
+                None => {
+                    warn!("Could not find track {} in fetched tracks - skipping", track_id);
+                    continue;
+                }
+            };
+            
+            let semaphore = Arc::clone(processing_semaphore);
+            let successful_tracks = Arc::clone(&successful_tracks);
+            
+            // Spawn a task to process this track
+            let webhook_url = config.discord_webhook_url.clone();
+            let temp_dir = config.temp_dir.clone();
+            let task = tokio::spawn(async move {
+                // Acquire semaphore to limit concurrent ffmpeg processes
+                let _permit = match semaphore.acquire().await {
+                    Ok(permit) => permit,
+                    Err(e) => {
+                        error!("Failed to acquire semaphore for track {}: {}", track.id, e);
+                        return;
+                    }
+                };
+                
+                debug!("Processing new track: {} (ID: {})", track.title, track.id);
+                
+                // Get full track details
+                let track_details = match crate::soundcloud::get_track_details(&track.id).await {
+                    Ok(t) => t,
+                    Err(e) => {
+                        error!("Failed to get track details for {}: {}", track.id, e);
+                        return;
+                    }
+                };
+                
+                // Download and process audio
+                info!("Processing audio and artwork for track");
+                let processing_result = match crate::audio::process_track_audio(&track_details, temp_dir.as_deref()).await {
+                    Ok((audio_files, artwork, json)) => {
+                        let mut files_for_discord = Vec::new();
+                        
+                        // Process all audio files
+                        for (format_info, path) in &audio_files {
+                            let file_path = path.clone();
+                            let filename = std::path::Path::new(&file_path)
+                                .file_name()
+                                .unwrap_or_else(|| std::ffi::OsStr::new("track.audio"))
+                                .to_string_lossy()
+                                .to_string();
+                            
+                            info!("Audio file ({}): {}", format_info, filename);
+                            files_for_discord.push((file_path, filename));
+                        }
+                        
+                        // Add artwork if available
+                        if let Some(path) = artwork {
+                            let file_path = path.clone();
+                            let filename = std::path::Path::new(&file_path)
+                                .file_name()
+                                .unwrap_or_else(|| std::ffi::OsStr::new("cover.jpg"))
+                                .to_string_lossy()
+                                .to_string();
+                            
+                            info!("Downloaded artwork: {}", filename);
+                            files_for_discord.push((file_path, filename));
+                        }
+                        
+                        // Add JSON metadata if available
+                        if let Some(path) = json {
+                            let file_path = path.clone();
+                            let filename = std::path::Path::new(&file_path)
+                                .file_name()
+                                .unwrap_or_else(|| std::ffi::OsStr::new("data.json"))
+                                .to_string_lossy()
+                                .to_string();
+                            
+                            info!("Saved JSON metadata: {}", filename);
+                            files_for_discord.push((file_path, filename));
+                        }
+                        
+                        files_for_discord
+                    },
+                    Err(e) => {
+                        error!("Failed to process audio for track {}: {}", track.id, e);
+                        Vec::new()
+                    }
+                };
+                
+                // Send to Discord
+                match crate::discord::send_track_webhook(&webhook_url, &track_details, Some(processing_result.clone())).await {
+                    Ok(_) => {
+                        info!("Successfully sent webhook for track: {} by {}", 
+                              track_details.title, track_details.user.username);
+                        let mut tracks = successful_tracks.lock().unwrap();
+                        tracks.push(track.id.clone());
+                    },
+                    Err(e) => {
+                        error!("Failed to send webhook for track {}: {}", track.id, e);
+                    }
+                };
+                
+                // Clean up temp files
+                for (path, _) in processing_result.clone() {
+                    if let Err(e) = crate::audio::delete_temp_file(&path).await {
+                        warn!("Failed to clean up temp file {}: {}", path, e);
+                    }
+                }
+            });
+            
+            tasks.push(task);
+        }
+        
+        // Wait for all track processing tasks to complete
+        let mut new_tracks_processed = 0;
+        
+        for task in tasks {
+            match task.await {
+                Ok(()) => {
+                    new_tracks_processed += 1;
+                },
+                Err(e) => {
+                    error!("Error in track processing task: {}", e);
+                    crate::loghandler::increment_error_count();
+                }
+            }
+        }
+        
+        // Add successful tracks to database
+        let successful_tracks = successful_tracks.lock().unwrap();
+        if !successful_tracks.is_empty() {
+            if let Err(e) = self.add_tracks_and_save(&successful_tracks) {
+                error!("Failed to add successful tracks to database: {}", e);
+            } else {
+                crate::loghandler::increment_total_tracks(successful_tracks.len() as u64);
+            }
+        }
+        
+        Ok(new_tracks_processed)
     }
 } 

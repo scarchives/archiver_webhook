@@ -1055,4 +1055,252 @@ pub fn extract_tracks_from_likes(likes: &[Like]) -> Vec<Track> {
     
     debug!("Extracted {} tracks from {} likes", tracks.len(), likes.len());
     tracks
+}
+
+/// Display information about a SoundCloud URL
+/// 
+/// Resolves a SoundCloud URL and displays formatted information about it.
+/// This function encapsulates the SoundCloud URL resolution logic that was previously in main.rs.
+pub async fn display_soundcloud_info(url: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    info!("Resolving SoundCloud URL: {}", url);
+    
+    // Resolve the URL
+    info!("Fetching metadata from SoundCloud API");
+    let resolved = match resolve_url(url).await {
+        Ok(data) => {
+            debug!("Successfully resolved URL");
+            data
+        },
+        Err(e) => {
+            error!("Failed to resolve URL: {}", e);
+            return Err(e);
+        }
+    };
+    
+    // Check if this is a track
+    if let Some(kind) = resolved.get("kind").and_then(|v| v.as_str()) {
+        info!("Resolved object type: {}", kind);
+        
+        if kind == "track" {
+            // Get the track ID
+            if let Some(id) = resolved.get("id").and_then(|v| v.as_u64()) {
+                let track_id = id.to_string();
+                info!("URL resolved to track ID: {}", track_id);
+                
+                // Get detailed track info
+                debug!("Fetching detailed track information");
+                let track = get_track_details(&track_id).await?;
+                
+                // Print track details
+                println!("\nTrack Information:");
+                println!("Title: {}", track.title);
+                println!("Artist: {}", track.user.username);
+                
+                if let Some(description) = &track.description {
+                    if !description.is_empty() {
+                        println!("Description: {}", description);
+                    }
+                }
+                
+                if let Some(count) = track.playback_count {
+                    println!("Plays: {}", count);
+                }
+                
+                if let Some(count) = track.likes_count {
+                    println!("Likes: {}", count);
+                }
+                
+                if let Some(genre) = &track.genre {
+                    if !genre.is_empty() {
+                        println!("Genre: {}", genre);
+                    }
+                }
+                
+                if let Some(tags) = &track.tag_list {
+                    if !tags.is_empty() {
+                        println!("Tags: {}", tags);
+                    }
+                }
+                
+                println!("Duration: {}:{:02}", track.duration / 1000 / 60, (track.duration / 1000) % 60);
+                println!("URL: {}", track.permalink_url);
+                
+                if track.downloadable.unwrap_or(false) {
+                    println!("Downloadable: Yes");
+                } else {
+                    println!("Downloadable: No");
+                }
+                
+                info!("Successfully displayed track information");
+                return Ok(());
+            }
+        } else if kind == "user" {
+            // Get the user ID
+            if let Some(id) = resolved.get("id").and_then(|v| v.as_u64()) {
+                let user_id = id.to_string();
+                info!("URL resolved to user ID: {}", user_id);
+                
+                // Print user details
+                println!("\nUser Information:");
+                println!("Username: {}", resolved.get("username").and_then(|v| v.as_str()).unwrap_or("Unknown"));
+                println!("ID: {}", user_id);
+                println!("URL: {}", resolved.get("permalink_url").and_then(|v| v.as_str()).unwrap_or(""));
+                
+                if let Some(followers) = resolved.get("followers_count").and_then(|v| v.as_u64()) {
+                    println!("Followers: {}", followers);
+                }
+                
+                if let Some(tracks) = resolved.get("track_count").and_then(|v| v.as_u64()) {
+                    println!("Tracks: {}", tracks);
+                }
+                
+                // Print instructions for adding to watchlist
+                println!("\nTo add this user to your watchlist, add the following ID to your users.json file:");
+                println!("  {}", user_id);
+                
+                info!("Successfully displayed user information");
+                return Ok(());
+            }
+        }
+    }
+    
+    // If we get here, something went wrong with the URL
+    warn!("URL resolved, but could not determine if it's a track or user");
+    println!("URL resolved, but could not determine if it's a track or user.");
+    println!("Raw data: {}", serde_json::to_string_pretty(&resolved)?);
+    
+    Ok(())
+}
+
+/// Process and post a single track to Discord
+/// 
+/// Takes either a track ID or URL, resolves it, processes the audio, and posts to Discord.
+/// This encapsulates the functionality previously in main.rs's post_single_track function.
+pub async fn process_and_post_track(
+    id_or_url: &str,
+    discord_webhook_url: &str,
+    temp_dir: Option<&str>
+) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Check if this is a URL or an ID
+    let track_id = if id_or_url.starts_with("http") {
+        // This is a URL, resolve it
+        info!("Resolving SoundCloud URL: {}", id_or_url);
+        let resolved = match resolve_url(id_or_url).await {
+            Ok(data) => data,
+            Err(e) => {
+                error!("Failed to resolve URL: {}", e);
+                return Err(e);
+            }
+        };
+        
+        // Check if it's a track
+        if let Some(kind) = resolved.get("kind").and_then(|v| v.as_str()) {
+            if kind == "track" {
+                if let Some(id) = resolved.get("id").and_then(|v| v.as_u64()) {
+                    let track_id = id.to_string();
+                    info!("URL resolved to track ID: {}", track_id);
+                    track_id
+                } else {
+                    error!("Could not extract track ID from resolved URL");
+                    return Err("Could not extract track ID from resolved URL".into());
+                }
+            } else {
+                error!("URL does not point to a track, but to a {}", kind);
+                return Err(format!("URL points to a {}, not a track", kind).into());
+            }
+        } else {
+            error!("Could not determine object type from resolved URL");
+            return Err("Could not determine object type from resolved URL".into());
+        }
+    } else {
+        // Assume this is a track ID
+        id_or_url.to_string()
+    };
+    
+    // Get track details
+    info!("Fetching track details for ID: {}", track_id);
+    let track_details = match get_track_details(&track_id).await {
+        Ok(t) => {
+            info!("Successfully fetched track: {} by {}", t.title, t.user.username);
+            t
+        },
+        Err(e) => {
+            error!("Failed to get track details: {}", e);
+            return Err(e);
+        }
+    };
+    
+    // Download and process audio
+    info!("Processing audio and artwork for track");
+    let processing_result = match crate::audio::process_track_audio(&track_details, temp_dir).await {
+        Ok((audio_files, artwork, json)) => {
+            let mut files = Vec::new();
+            
+            // Process all audio files
+            for (format_info, path) in &audio_files {
+                let file_path = path.clone();
+                let filename = std::path::Path::new(&file_path)
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("track.audio"))
+                    .to_string_lossy()
+                    .to_string();
+                
+                info!("Audio file ({}): {}", format_info, filename);
+                files.push((file_path, filename));
+            }
+            
+            if let Some(path) = artwork {
+                let file_path = path.clone();
+                let filename = std::path::Path::new(&file_path)
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("cover.jpg"))
+                    .to_string_lossy()
+                    .to_string();
+                
+                info!("Downloaded artwork: {}", filename);
+                files.push((file_path, filename));
+            }
+            
+            if let Some(path) = json {
+                let file_path = path.clone();
+                let filename = std::path::Path::new(&file_path)
+                    .file_name()
+                    .unwrap_or_else(|| std::ffi::OsStr::new("data.json"))
+                    .to_string_lossy()
+                    .to_string();
+                
+                info!("Saved JSON metadata: {}", filename);
+                files.push((file_path, filename));
+            }
+            
+            files
+        },
+        Err(e) => {
+            error!("Failed to process track media: {}", e);
+            Vec::new() // Continue without audio files
+        }
+    };
+    
+    // Send to Discord
+    info!("Sending webhook for track: {} by {}", track_details.title, track_details.user.username);
+    match crate::discord::send_track_webhook(discord_webhook_url, &track_details, Some(processing_result.clone())).await {
+        Ok(_) => {
+            info!("Successfully sent webhook for track");
+            println!("Track successfully posted to Discord: {} by {}", 
+                   track_details.title, track_details.user.username);
+        },
+        Err(e) => {
+            error!("Failed to send webhook: {}", e);
+            return Err(e);
+        }
+    }
+    
+    // Clean up temp files
+    for (path, _) in processing_result.clone() {
+        if let Err(e) = crate::audio::delete_temp_file(&path).await {
+            warn!("Failed to clean up temp file {}: {}", path, e);
+        }
+    }
+    
+    Ok(())
 } 
