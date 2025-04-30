@@ -14,6 +14,7 @@ pub fn show_help() {
     println!("  archiver_webhook --init-tracks   - Initialize tracks database with existing tracks");
     println!("  archiver_webhook --post-track ID - Post a specific track to webhook (bypass database)");
     println!("                               - Can be a track ID or a SoundCloud URL");
+    println!("  archiver_webhook --lookup-discord-id ID - Look up a track by Discord message ID");
     println!("  archiver_webhook --generate-config URL - Generate config.json and users.json files");
     println!("                               - URL should be a SoundCloud user profile");
     println!("  archiver_webhook --help          - Show this help");
@@ -163,6 +164,19 @@ pub async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error
         }
     };
     
+    // Initialize database to store the Discord message ID
+    let tracks_db_path = config.tracks_file.clone();
+    let mut db = match TrackDatabase::load_or_create(tracks_db_path) {
+        Ok(d) => {
+            debug!("Tracks database initialized from {}", d.db_path);
+            d
+        },
+        Err(e) => {
+            error!("Failed to initialize tracks database: {}", e);
+            return Err(e);
+        }
+    };
+    
     // Initialize SoundCloud client
     info!("Initializing SoundCloud client");
     match soundcloud::initialize().await {
@@ -174,11 +188,34 @@ pub async fn post_single_track(id_or_url: &str) -> Result<(), Box<dyn std::error
     }
     
     // Use our modularized function to process and post the track
-    soundcloud::process_and_post_track(
+    let result = match soundcloud::process_and_post_track(
         id_or_url, 
         &config.discord_webhook_url, 
         config.temp_dir.as_deref()
-    ).await
+    ).await {
+        Ok((track_id, user_id, webhook_response)) => {
+            // Store the Discord message ID in the database
+            db.add_track_with_discord_info(
+                &track_id,
+                webhook_response.message_id.clone(),
+                webhook_response.channel_id.clone(),
+                Some(user_id)
+            );
+            
+            // Save the database
+            if let Err(e) = db.save() {
+                warn!("Failed to save track with Discord message ID to database: {}", e);
+            } else {
+                info!("Stored track {} with Discord message ID {} in database", 
+                     track_id, webhook_response.message_id);
+            }
+            
+            Ok(())
+        },
+        Err(e) => Err(e),
+    };
+    
+    result
 }
 
 /// Generate config.json and users.json files interactively based on a SoundCloud user's followings
@@ -446,5 +483,113 @@ pub fn read_line_with_default(default: &str) -> String {
         }
     } else {
         default.to_string()
+    }
+}
+
+/// Look up a track by its Discord message ID
+pub async fn lookup_by_discord_id(discord_id: &str) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // Load config
+    let config_path = "config.json";
+    info!("Loading configuration from {}", config_path);
+    let config = match Config::load(config_path) {
+        Ok(c) => {
+            debug!("Configuration loaded successfully");
+            debug!("Log level: {}", c.log_level);
+            debug!("Tracks file: {}", c.tracks_file);
+            // Update log level based on config
+            update_log_level(&c.log_level);
+            c
+        },
+        Err(e) => {
+            error!("Failed to load config: {}", e);
+            return Err(e);
+        }
+    };
+    
+    // Load database
+    let tracks_db_path = config.tracks_file.clone();
+    let db = match TrackDatabase::load_or_create(tracks_db_path) {
+        Ok(d) => {
+            debug!("Tracks database initialized from {}", d.db_path);
+            d
+        },
+        Err(e) => {
+            error!("Failed to initialize tracks database: {}", e);
+            return Err(e);
+        }
+    };
+    
+    // Look up the track by Discord message ID
+    if let Some(track_id) = db.find_track_by_discord_id(discord_id) {
+        println!("\nFound track with Discord message ID {}:", discord_id);
+        println!("- SoundCloud track ID: {}", track_id);
+        
+        // Get Discord info for additional details
+        if let Some(discord_info) = db.get_discord_info(&track_id) {
+            println!("- Discord message ID: {}", discord_info.id);
+            if let Some(channel_id) = discord_info.channel_id {
+                println!("- Discord channel ID: {}", channel_id);
+            }
+            if let Some(user_id) = discord_info.user_id {
+                println!("- Posted by user ID: {}", user_id);
+            }
+        }
+        
+        // Initialize SoundCloud client to get track details
+        info!("Initializing SoundCloud client to get track details");
+        match soundcloud::initialize().await {
+            Ok(_) => info!("SoundCloud client initialized successfully"),
+            Err(e) => {
+                error!("Failed to initialize SoundCloud client: {}", e);
+                return Err(e);
+            }
+        }
+        
+        // Get track details
+        match soundcloud::get_track_details(&track_id).await {
+            Ok(track) => {
+                println!("\nTrack details:");
+                println!("- Title: {}", track.title);
+                println!("- Artist: {}", track.user.username);
+                println!("- URL: {}", track.permalink_url);
+                
+                if let Some(desc) = &track.description {
+                    if !desc.is_empty() {
+                        println!("- Description: {}", desc);
+                    }
+                }
+                
+                if let Some(genre) = &track.genre {
+                    if !genre.is_empty() {
+                        println!("- Genre: {}", genre);
+                    }
+                }
+                
+                let duration_mins = track.duration / 1000 / 60;
+                let duration_secs = (track.duration / 1000) % 60;
+                println!("- Duration: {}:{:02}", duration_mins, duration_secs);
+                
+                if let Some(plays) = track.playback_count {
+                    println!("- Plays: {}", plays);
+                }
+                
+                if let Some(likes) = track.likes_count {
+                    println!("- Likes: {}", likes);
+                }
+                
+                if track.downloadable.unwrap_or(false) {
+                    println!("- Downloadable: Yes");
+                }
+            },
+            Err(e) => {
+                println!("\nFailed to fetch track details: {}", e);
+                println!("The track might have been deleted from SoundCloud.");
+            }
+        }
+        
+        Ok(())
+    } else {
+        println!("No track found with Discord message ID: {}", discord_id);
+        Ok(())
     }
 } 

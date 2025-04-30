@@ -5,6 +5,7 @@ use std::path::Path;
 use log::{info, debug, trace, error, warn};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
+use serde_json::Value;
 
 /// Discord message information
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -37,20 +38,101 @@ impl TrackDatabase {
         }
     }
     
+    /// Attempt to migrate from an older database format if needed
+    /// 
+    /// This function safely handles migration from the old HashSet format to the new HashMap format.
+    /// It's called during database loading to ensure backward compatibility.
+    fn migrate_from_old_format(file_path: &str) -> Result<Option<Self>, Box<dyn std::error::Error + Send + Sync>> {
+        // Try to open the file
+        let file = match File::open(file_path) {
+            Ok(f) => f,
+            Err(e) => return Err(e.into()),
+        };
+        
+        let reader = BufReader::new(file);
+        
+        // First, try to parse as a raw JSON Value to check the structure
+        let json_value: Value = match serde_json::from_reader(reader) {
+            Ok(v) => v,
+            Err(e) => return Err(e.into()),
+        };
+        
+        // Check if this is the old format (array of track IDs)
+        if let Some(tracks_array) = json_value.get("tracks").and_then(|t| t.as_array()) {
+            info!("Detected old database format with {} tracks. Migrating to new format...", tracks_array.len());
+            
+            // Create a new database with the new format
+            let mut new_db = TrackDatabase::new(file_path.to_string());
+            
+            // Convert each track ID to the new format
+            for track_id in tracks_array {
+                if let Some(id) = track_id.as_str() {
+                    new_db.tracks.insert(id.to_string(), None);
+                } else if let Some(id) = track_id.as_u64() {
+                    new_db.tracks.insert(id.to_string(), None);
+                }
+            }
+            
+            info!("Migration complete. Converted {} tracks to new format.", new_db.tracks.len());
+            
+            // Create a backup of the old file
+            let backup_path = format!("{}.old_format.bak", file_path);
+            match copy(file_path, &backup_path) {
+                Ok(_) => info!("Created backup of old database format at {}", backup_path),
+                Err(e) => warn!("Failed to create backup of old database format: {}", e),
+            }
+            
+            // Save the new format
+            if let Err(e) = new_db.save() {
+                error!("Failed to save migrated database: {}", e);
+                return Err(e.into());
+            }
+            
+            return Ok(Some(new_db));
+        }
+        
+        // Not an old format, or couldn't determine
+        Ok(None)
+    }
+    
     /// Load from file or create a new instance
     pub fn load_or_create(db_path: String) -> Result<Self, Box<dyn std::error::Error + Send + Sync>> {
         if Path::new(&db_path).exists() {
-            // Load database from file
+            // Try to migrate from an old format first
+            if let Ok(Some(migrated_db)) = Self::migrate_from_old_format(&db_path) {
+                return Ok(migrated_db);
+            }
+            
+            // Load database from file with the current format
             debug!("Loading tracks database from {}", db_path);
             let file = File::open(&db_path)?;
             let reader = BufReader::new(file);
-            let mut db: TrackDatabase = serde_json::from_reader(reader)?;
-            db.db_path = db_path;
             
-            let track_count = db.tracks.len();
-            info!("Loaded tracks database with {} tracks", track_count);
-            
-            Ok(db)
+            // Try to deserialize with the current format
+            match serde_json::from_reader::<_, TrackDatabase>(reader) {
+                Ok(mut db) => {
+                    db.db_path = db_path;
+                    let track_count = db.tracks.len();
+                    info!("Loaded tracks database with {} tracks", track_count);
+                    Ok(db)
+                },
+                Err(e) => {
+                    error!("Failed to deserialize tracks database: {}", e);
+                    
+                    // Create a backup of the corrupted file
+                    let backup_path = format!("{}.corrupted.bak", db_path);
+                    match copy(&db_path, &backup_path) {
+                        Ok(_) => info!("Created backup of corrupted database at {}", backup_path),
+                        Err(e) => warn!("Failed to create backup of corrupted database: {}", e),
+                    }
+                    
+                    // Create a new empty database as fallback
+                    warn!("Creating new empty database due to loading error");
+                    let db = TrackDatabase::new(db_path);
+                    db.save()?;
+                    Ok(db)
+                }
+            }
         } else {
             // Create a new database and save it to file
             debug!("Tracks database file not found, creating new one at {}", db_path);
@@ -188,6 +270,55 @@ impl TrackDatabase {
             Some(Some(info)) => Some(info.clone()),
             _ => None,
         }
+    }
+    
+    /// Find a track ID by its Discord message ID
+    /// 
+    /// This allows reverse lookup when you have a Discord message ID but need to find
+    /// the associated SoundCloud track ID.
+    pub fn find_track_by_discord_id(&self, discord_id: &str) -> Option<String> {
+        for (track_id, discord_info) in &self.tracks {
+            if let Some(info) = discord_info {
+                if info.id == discord_id {
+                    return Some(track_id.clone());
+                }
+            }
+        }
+        None
+    }
+    
+    /// Find all tracks by a specific user ID
+    /// 
+    /// Returns a list of track IDs that were posted by the specified user ID
+    pub fn find_tracks_by_user(&self, user_id: &str) -> Vec<String> {
+        let mut result = Vec::new();
+        
+        for (track_id, discord_info) in &self.tracks {
+            if let Some(info) = discord_info {
+                if let Some(id) = &info.user_id {
+                    if id == user_id {
+                        result.push(track_id.clone());
+                    }
+                }
+            }
+        }
+        
+        result
+    }
+    
+    /// Get all Discord message IDs stored in the database
+    /// 
+    /// Returns a list of all Discord message IDs that have been stored
+    pub fn get_all_discord_ids(&self) -> Vec<String> {
+        let mut result = Vec::new();
+        
+        for (_track_id, discord_info) in &self.tracks {
+            if let Some(info) = discord_info {
+                result.push(info.id.clone());
+            }
+        }
+        
+        result
     }
     
     /// Initialize the database with a batch of track IDs

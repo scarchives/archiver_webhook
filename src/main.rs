@@ -43,6 +43,10 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
                 info!("Running in post-track mode");
                 return cli::post_single_track(&args[2]).await;
             },
+            "--lookup-discord-id" if args.len() > 2 => {
+                info!("Running in Discord ID lookup mode");
+                return cli::lookup_by_discord_id(&args[2]).await;
+            },
             "--generate-config" if args.len() > 2 => {
                 info!("Running in config generation mode");
                 return cli::generate_config(&args[2]).await;

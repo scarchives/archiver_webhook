@@ -1175,12 +1175,12 @@ pub async fn display_soundcloud_info(url: &str) -> Result<(), Box<dyn std::error
 /// Process and post a single track to Discord
 /// 
 /// Takes either a track ID or URL, resolves it, processes the audio, and posts to Discord.
-/// This encapsulates the functionality previously in main.rs's post_single_track function.
+/// Returns the Discord message ID and track ID for further processing.
 pub async fn process_and_post_track(
     id_or_url: &str,
     discord_webhook_url: &str,
     temp_dir: Option<&str>
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<(String, String, crate::discord::WebhookResponse), Box<dyn std::error::Error + Send + Sync>> {
     // Check if this is a URL or an ID
     let track_id = if id_or_url.starts_with("http") {
         // This is a URL, resolve it
@@ -1283,17 +1283,19 @@ pub async fn process_and_post_track(
     
     // Send to Discord
     info!("Sending webhook for track: {} by {}", track_details.title, track_details.user.username);
-    match crate::discord::send_track_webhook(discord_webhook_url, &track_details, Some(processing_result.clone())).await {
-        Ok(_) => {
-            info!("Successfully sent webhook for track");
+    let webhook_response = match crate::discord::send_track_webhook(discord_webhook_url, &track_details, Some(processing_result.clone())).await {
+        Ok(response) => {
+            info!("Successfully sent webhook for track with message ID: {}", response.message_id);
             println!("Track successfully posted to Discord: {} by {}", 
                    track_details.title, track_details.user.username);
+            println!("Discord message ID: {}", response.message_id);
+            response
         },
         Err(e) => {
             error!("Failed to send webhook: {}", e);
             return Err(e);
         }
-    }
+    };
     
     // Clean up temp files
     for (path, _) in processing_result.clone() {
@@ -1302,5 +1304,5 @@ pub async fn process_and_post_track(
         }
     }
     
-    Ok(())
+    Ok((track_id, track_details.user.id.clone(), webhook_response))
 } 
