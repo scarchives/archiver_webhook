@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 use std::env;
@@ -6,8 +5,7 @@ use std::io::{self, Write, BufRead};
 use log::{info, warn, error, debug};
 use tokio::sync::Mutex;
 use log::LevelFilter;
-use crate::loghandler::{increment_total_tracks, increment_new_tracks, increment_error_count, setup_logging};
-use tokio::sync::Semaphore;
+use crate::loghandler::{increment_new_tracks, increment_error_count, setup_logging};
 
 mod audio;
 mod config;
@@ -462,8 +460,6 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
             let batch = &users_vec[users_processed..users_processed + batch_size];
             
             let mut tasks = Vec::new();
-            let semaphore = Arc::new(Semaphore::new(config.max_concurrent_processing));
-            let successful_tracks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
             
             // Create tasks for each user in the batch
             for user_id in batch {
@@ -532,7 +528,7 @@ async fn run_watcher_mode() -> Result<(), Box<dyn std::error::Error + Send + Syn
             info!("Saving database: {}", save_reason);
             
             // Hold the mutex lock for the entire save operation
-            let mut db_guard = db.lock().await;
+            let db_guard = db.lock().await;
             if let Err(e) = db_guard.save() {
                 error!("Failed to save tracks database: {}", e);
             } else {

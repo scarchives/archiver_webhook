@@ -1,6 +1,6 @@
 use std::fs::OpenOptions;
 use std::io::Write;
-use log::{LevelFilter, info, warn, error};
+use log::{LevelFilter, info, warn};
 use std::sync::atomic::{AtomicU64, AtomicU32, Ordering};
 use std::time::Duration;
 use tokio::time;
