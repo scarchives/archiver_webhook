@@ -7,14 +7,28 @@ use tokio::io::AsyncReadExt;
 use log::{info, warn, error, debug};
 use crate::soundcloud::Track;
 
+/// Response data from a Discord webhook
+#[derive(Debug, Clone)]
+pub struct WebhookResponse {
+    pub message_id: String,
+    pub channel_id: Option<String>,
+}
+
 /// Send a track to Discord via webhook
 pub async fn send_track_webhook(
     webhook_url: &str, 
     track: &Track,
     audio_files: Option<Vec<(String, String)>> // Vec of (file_path, file_name)
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<WebhookResponse, Box<dyn std::error::Error + Send + Sync>> {
     // Create the webhook client
     let client = Client::new();
+    
+    // Add wait=true parameter to webhook URL
+    let webhook_url = if webhook_url.contains('?') {
+        format!("{}&wait=true", webhook_url)
+    } else {
+        format!("{}?wait=true", webhook_url)
+    };
     
     // Build the embed object
     info!("Preparing Discord webhook for track '{}' (ID: {})", track.title, track.id);
@@ -31,20 +45,20 @@ pub async fn send_track_webhook(
     let result = if let Some(files) = audio_files {
         if files.is_empty() {
             debug!("No audio files attached, sending embed only");
-            send_embed_only(client, webhook_url, embed).await
+            send_embed_only(client, &webhook_url, embed).await
         } else {
             debug!("Attaching {} audio files to webhook", files.len());
-            send_with_audio_files(client, webhook_url, embed, files).await
+            send_with_audio_files(client, &webhook_url, embed, files).await
         }
     } else {
         debug!("No audio files provided, sending embed only");
-        send_embed_only(client, webhook_url, embed).await
+        send_embed_only(client, &webhook_url, embed).await
     };
     
     // Log result
     match &result {
-        Ok(_) => info!("Successfully sent Discord webhook for track '{}' with {} audio files", 
-                      track.title, files_count),
+        Ok(response) => info!("Successfully sent Discord webhook for track '{}' with {} audio files. Message ID: {}", 
+                           track.title, files_count, response.message_id),
         Err(e) => error!("Failed to send Discord webhook for track '{}': {}", track.title, e),
     }
     
@@ -239,7 +253,7 @@ async fn send_embed_only(
     client: Client, 
     webhook_url: &str, 
     embed: Value
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<WebhookResponse, Box<dyn std::error::Error + Send + Sync>> {
     debug!("Preparing embed-only Discord webhook request");
     
     let payload = json!({
@@ -263,8 +277,31 @@ async fn send_embed_only(
         return Err(format!("Discord webhook error: {} - {}", status, error_text).into());
     }
     
-    debug!("Discord webhook sent successfully");
-    Ok(())
+    // Parse the response JSON to get the message ID
+    let response_json: Value = response.json().await?;
+    let message_id = match response_json.get("id") {
+        Some(id) => {
+            match id.as_str() {
+                Some(id_str) => id_str.to_string(),
+                None => {
+                    error!("Failed to extract message ID from Discord response");
+                    return Err("Failed to extract message ID from Discord response".into());
+                }
+            }
+        },
+        None => {
+            error!("No message ID in Discord response");
+            return Err("No message ID in Discord response".into());
+        }
+    };
+    
+    // Extract channel_id if available
+    let channel_id = response_json.get("channel_id")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
+    
+    debug!("Discord webhook sent successfully, message ID: {}", message_id);
+    Ok(WebhookResponse { message_id, channel_id })
 }
 
 /// Send the embed with audio file attachments
@@ -273,7 +310,7 @@ async fn send_with_audio_files(
     webhook_url: &str,
     embed: Value,
     files: Vec<(String, String)> // Vec of (file_path, file_name)
-) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+) -> Result<WebhookResponse, Box<dyn std::error::Error + Send + Sync>> {
     debug!("Preparing multipart request with {} audio files", files.len());
     
     // Discord limits: 
@@ -457,6 +494,29 @@ async fn send_with_audio_files(
         return Err(format!("Discord webhook error: {} - {}", status, error_text).into());
     }
     
-    debug!("Discord webhook with files sent successfully");
-    Ok(())
+    // Parse the response JSON to get the message ID
+    let response_json: Value = response.json().await?;
+    let message_id = match response_json.get("id") {
+        Some(id) => {
+            match id.as_str() {
+                Some(id_str) => id_str.to_string(),
+                None => {
+                    error!("Failed to extract message ID from Discord response");
+                    return Err("Failed to extract message ID from Discord response".into());
+                }
+            }
+        },
+        None => {
+            error!("No message ID in Discord response");
+            return Err("No message ID in Discord response".into());
+        }
+    };
+    
+    // Extract channel_id if available
+    let channel_id = response_json.get("channel_id")
+        .and_then(|c| c.as_str())
+        .map(|s| s.to_string());
+    
+    debug!("Discord webhook with files sent successfully, message ID: {}", message_id);
+    Ok(WebhookResponse { message_id, channel_id })
 } 

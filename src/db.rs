@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashSet, HashMap};
 use std::fs::{File, copy, remove_file};
 use std::io::{BufReader, BufWriter};
 use std::path::Path;
@@ -6,12 +6,23 @@ use log::{info, debug, trace, error, warn};
 use serde::{Deserialize, Serialize};
 use std::sync::{Arc, Mutex};
 
+/// Discord message information
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DiscordMessage {
+    /// Discord message ID
+    pub id: String,
+    /// Discord channel ID
+    pub channel_id: Option<String>,
+    /// User who originally posted the track
+    pub user_id: Option<String>,
+}
+
 /// Simple database to store known track IDs
 #[derive(Debug, Serialize, Deserialize)]
 pub struct TrackDatabase {
-    // Set of track_ids
+    // Map of track_ids to Discord message info
     #[serde(default)]
-    tracks: HashSet<String>,
+    tracks: HashMap<String, Option<DiscordMessage>>,
     // Path to the database file (if persistent)
     #[serde(skip)]
     pub db_path: String,
@@ -21,7 +32,7 @@ impl TrackDatabase {
     /// Create a new database instance
     pub fn new(db_path: String) -> Self {
         TrackDatabase {
-            tracks: HashSet::new(),
+            tracks: HashMap::new(),
             db_path,
         }
     }
@@ -112,14 +123,14 @@ impl TrackDatabase {
     
     /// Get all tracks in the database
     pub fn get_all_tracks(&self) -> Vec<String> {
-        let tracks: Vec<String> = self.tracks.iter().cloned().collect();
+        let tracks: Vec<String> = self.tracks.keys().cloned().collect();
         debug!("Retrieved {} total tracks from database", tracks.len());
         tracks
     }
     
     /// Check if a track is already in the database
     pub fn has_track(&self, track_id: &str) -> bool {
-        let has = self.tracks.contains(track_id);
+        let has = self.tracks.contains_key(track_id);
         trace!("Track {} in database: {}", track_id, if has { "exists" } else { "new" });
         has
     }
@@ -140,7 +151,7 @@ impl TrackDatabase {
         if !new_tracks.is_empty() {
             // Add the new tracks
             for track_id in &new_tracks {
-                self.tracks.insert(track_id.clone());
+                self.tracks.insert(track_id.clone(), None);
                 trace!("Added new track {} to database", track_id);
             }
             
@@ -153,12 +164,38 @@ impl TrackDatabase {
         new_tracks
     }
     
+    /// Add a track with Discord message information
+    pub fn add_track_with_discord_info(
+        &mut self, 
+        track_id: &str, 
+        discord_id: String, 
+        channel_id: Option<String>,
+        user_id: Option<String>
+    ) {
+        let discord_info = DiscordMessage {
+            id: discord_id,
+            channel_id,
+            user_id,
+        };
+        
+        self.tracks.insert(track_id.to_string(), Some(discord_info));
+        debug!("Added track {} with Discord message info", track_id);
+    }
+    
+    /// Get Discord message info for a track if it exists
+    pub fn get_discord_info(&self, track_id: &str) -> Option<DiscordMessage> {
+        match self.tracks.get(track_id) {
+            Some(Some(info)) => Some(info.clone()),
+            _ => None,
+        }
+    }
+    
     /// Initialize the database with a batch of track IDs
     pub fn initialize_with_tracks(&mut self, track_ids: &[String]) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         let count_before = self.tracks.len();
         
         for track_id in track_ids {
-            self.tracks.insert(track_id.clone());
+            self.tracks.insert(track_id.clone(), None);
         }
         
         let new_count = self.tracks.len() - count_before;
@@ -319,7 +356,7 @@ impl TrackDatabase {
         
         // Process new tracks in parallel with a resource limit for ffmpeg
         let mut tasks = Vec::new();
-        let successful_tracks: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+        let successful_tracks: Arc<Mutex<Vec<(String, Option<String>, Option<String>)>>> = Arc::new(Mutex::new(Vec::new()));
         
         for track_id in &new_track_ids {
             // Find the track in our collection
@@ -337,6 +374,7 @@ impl TrackDatabase {
             // Spawn a task to process this track
             let webhook_url = config.discord_webhook_url.clone();
             let temp_dir = config.temp_dir.clone();
+            let user_id_clone = user_id.to_string();
             let task = tokio::spawn(async move {
                 // Acquire semaphore to limit concurrent ffmpeg processes
                 let _permit = match semaphore.acquire().await {
@@ -413,11 +451,15 @@ impl TrackDatabase {
                 
                 // Send to Discord
                 match crate::discord::send_track_webhook(&webhook_url, &track_details, Some(processing_result.clone())).await {
-                    Ok(_) => {
-                        info!("Successfully sent webhook for track: {} by {}", 
-                              track_details.title, track_details.user.username);
+                    Ok(response) => {
+                        info!("Successfully sent webhook for track: {} by {} (Discord message ID: {})", 
+                              track_details.title, track_details.user.username, response.message_id);
                         let mut tracks = successful_tracks.lock().unwrap();
-                        tracks.push(track.id.clone());
+                        tracks.push((
+                            track.id.clone(),
+                            Some(response.message_id),
+                            response.channel_id
+                        ));
                     },
                     Err(e) => {
                         error!("Failed to send webhook for track {}: {}", track.id, e);
@@ -450,13 +492,32 @@ impl TrackDatabase {
             }
         }
         
-        // Add successful tracks to database
-        let successful_tracks = successful_tracks.lock().unwrap();
-        if !successful_tracks.is_empty() {
-            if let Err(e) = self.add_tracks_and_save(&successful_tracks) {
-                error!("Failed to add successful tracks to database: {}", e);
+        // Add successful tracks to database with Discord info
+        let successful_tracks_guard = successful_tracks.lock().unwrap();
+        if !successful_tracks_guard.is_empty() {
+            // Add successful tracks to the database with Discord message info
+            for (track_id, message_id, channel_id) in successful_tracks_guard.iter() {
+                if let Some(discord_id) = message_id {
+                    // Add with Discord message info
+                    self.add_track_with_discord_info(
+                        track_id, 
+                        discord_id.clone(), 
+                        channel_id.clone(),
+                        Some(user_id.to_string())
+                    );
+                } else {
+                    // Just add the track without Discord info
+                    self.tracks.insert(track_id.clone(), None);
+                }
+            }
+            
+            // Save the database
+            if let Err(e) = self.save() {
+                error!("Failed to save tracks database with Discord info: {}", e);
             } else {
-                crate::loghandler::increment_total_tracks(successful_tracks.len() as u64);
+                info!("Database saved with {} tracks including Discord message IDs", 
+                     successful_tracks_guard.len());
+                crate::loghandler::increment_total_tracks(successful_tracks_guard.len() as u64);
             }
         }
         
