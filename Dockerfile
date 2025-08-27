@@ -28,7 +28,7 @@ ENV RUST_LOG=info
 # Add image labels
 LABEL org.opencontainers.image.title="SoundCloud Archiver Webhook" \
       org.opencontainers.image.description="Watches SoundCloud users for new tracks and sends them to Discord" \
-      org.opencontainers.image.source="https://github.com/scarchive/archiver_webhook" \
+      org.opencontainers.image.source="https://github.com/scarchives/archiver_webhook" \
       org.opencontainers.image.licenses="MIT"
 
 # Run the application
